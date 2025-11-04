@@ -1,0 +1,16 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python -c \"import sys; sys.path.insert(0, ''..''); from commands.commands import InsertIntoZoneCommand, RemoveFromZoneCommand; from scene.board import BoardScene; print(''No circular dependency - imports successful!'')\")",
+      "Bash(dir /s \"c:\\Users\\Johnny\\Documents\\Python\\sorcerous\")",
+      "Bash(dir \"c:\\Users\\Johnny\\Documents\\Python\\sorcerous\\project\")",
+      "Bash(dir:*)",
+      "Bash(nul)",
+      "Bash(tree:*)",
+      "Bash(find:*)",
+      "Bash(python __main__.py:*)"
+    ],
+    "deny": [],
+    "ask": []
+  }
+}
