@@ -14,7 +14,8 @@ from PySide6.QtWidgets import (
 from scene.board import BoardScene, BoardView
 from model.board import BoardModel
 from camera.camera import VirtualCamThread
-from zones.zone import Zone
+from zones.hand import HandZone
+from zones.library import LibraryZone
 from card.card import Card
 
 from pathlib import Path
@@ -55,9 +56,10 @@ class MainWindow(QMainWindow):
         self._capture_interval = 1.0 / 60.0  # seconds
 
         # Populate items
-        self.hand_zone = Zone("hand", slot_h=160, padding=16,
-                              orientation="horizontal", hide_cards=True)
+        self.hand_zone = HandZone("hand")
+        self.library_zone = LibraryZone("library")
         self.scene.add_zone(self.hand_zone, QPointF(0, 0))
+        self.scene.add_zone(self.library_zone, QPointF(0, 0))
 
         cols = 4
         spacing = QPointF(150, 120)
@@ -187,16 +189,16 @@ class MainWindow(QMainWindow):
         view_src = self.view.mapToScene(self.view.viewport().rect()).boundingRect()
         margin = 12.0
         self.scene.setSceneRect(view_src.adjusted(-margin, -margin, margin, margin))
-        self._layout_hand_zone()
+        self._layout_zones()
 
-    def _layout_hand_zone(self):
-        if not hasattr(self, "hand_zone"):
+    def _layout_zones(self):
+        if not hasattr(self, "hand_zone") or not hasattr(self, "library_zone"):
             return
         view_rect = self.view.mapToScene(self.view.viewport().rect()).boundingRect()
         if view_rect.isNull() or view_rect.width() <= 0:
             return
-        self.hand_zone.set_width(view_rect.width())
-        self.hand_zone.set_bottom_anchor(view_rect.left(), view_rect.bottom())
+        self.hand_zone.layout_to_view(view_rect)
+        self.library_zone.layout_to_view(view_rect, self.hand_zone)
 
     def _wrap_release(self, original_release, card: Card):
         def handler(ev):

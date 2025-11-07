@@ -26,11 +26,14 @@ class Zone(QGraphicsObject):
         self.highlight = False
         self.anchor_left: float | None = None
         self.anchor_bottom: float | None = None
+        self.fixed_height: float | None = None
         self.setCacheMode(QGraphicsObject.CacheMode.DeviceCoordinateCache)
         self.setAcceptedMouseButtons(Qt.NoButton)
 
     def boundingRect(self) -> QRectF:
-        if self.orientation == "vertical":
+        if self.fixed_height is not None:
+            total_h = self.fixed_height
+        elif self.orientation == "vertical":
             total_h = max(self.slot_h * max(1,len(self.cards)), self.slot_h)
         else:
             total_h = self.slot_h
@@ -82,6 +85,15 @@ class Zone(QGraphicsObject):
             return
         self.prepareGeometryChange()
         self.width = width
+        self.update()
+        self.reflow_cards()
+
+    def set_height(self, height: float):
+        height = max(1.0, height)
+        if self.fixed_height == height:
+            return
+        self.prepareGeometryChange()
+        self.fixed_height = height
         self.update()
         self.reflow_cards()
 
