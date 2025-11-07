@@ -17,6 +17,7 @@ from camera.camera import VirtualCamThread
 from zones.hand import HandZone
 from zones.library import LibraryZone
 from card.card import Card
+from ui.load_menu import LoadMenu
 
 from pathlib import Path
 
@@ -44,8 +45,12 @@ class MainWindow(QMainWindow):
         self.view.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.view.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
 
+        self.load_menu = LoadMenu(self)
+        self.load_menu.raise_()
+
         # Freeze window size after initial layout
         QTimer.singleShot(0, self._sync_scene_rect_to_viewport)
+        QTimer.singleShot(0, self._position_load_menu)
 
         # Virtual cam setup
         self.frame_queue: queue.Queue = queue.Queue(maxsize=1)
@@ -185,6 +190,7 @@ class MainWindow(QMainWindow):
     def resizeEvent(self, ev):
         super().resizeEvent(ev)
         self._sync_scene_rect_to_viewport()
+        self._position_load_menu()
 
     def _sync_scene_rect_to_viewport(self):
         view_src = self.view.mapToScene(self.view.viewport().rect()).boundingRect()
@@ -200,6 +206,18 @@ class MainWindow(QMainWindow):
             return
         self.hand_zone.layout_to_view(view_rect)
         self.library_zone.layout_to_view(view_rect, self.hand_zone)
+
+    def _position_load_menu(self):
+        if not hasattr(self, "load_menu") or self.load_menu is None:
+            return
+        self.load_menu.adjustSize()
+        size = self.load_menu.size()
+        center = self.rect().center()
+        top_left = QPoint(
+            max(0, center.x() - size.width() // 2),
+            max(0, center.y() - size.height() // 2),
+        )
+        self.load_menu.move(top_left)
 
     def _wrap_release(self, original_release, card: Card):
         def handler(ev):
