@@ -10,8 +10,8 @@ from pyvirtualcam import PixelFormat
 class VirtualCamThread(threading.Thread):
     def __init__(self,
                  frame_queue: queue.Queue,
-                 width: int = 1280,
-                 height: int = 720,
+                 width: int = 1920,
+                 height: int = 1080,
                  fps: float = 60.0):
         super().__init__(daemon=True)
         self.frame_queue = frame_queue
