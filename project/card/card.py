@@ -1,6 +1,16 @@
-from PySide6.QtCore import Qt, QRectF, QPointF, Signal
+from PySide6.QtCore import Qt, QRectF, QPointF, Signal, QVariantAnimation, QEasingCurve
 from PySide6.QtWidgets import QGraphicsObject
-from PySide6.QtGui import QBrush, QColor, QPen, QPixmap, QPainter
+from PySide6.QtGui import QBrush, QColor, QPen, QPixmap, QPainter, QTransform
+
+HOVER_SCALE_FACTOR = 1.1
+HOVER_ANIMATION_DURATION_MS = 100
+HOVER_OSCILLATION_OFFSET = 8
+HOVER_OSCILLATION_DURATION_MS = 1200
+HOVER_SHADOW_COLOR = QColor(0, 0, 0, 120)
+HOVER_SHADOW_OFFSET_X = 128
+HOVER_SHADOW_OFFSET_Y = 64
+HOVER_SHADOW_EXPANSION = 24
+
 
 class Card(QGraphicsObject):
     # Render target for all Card paints: "screen" or "camera"
@@ -37,9 +47,27 @@ class Card(QGraphicsObject):
             | QGraphicsObject.ItemIsSelectable
             | QGraphicsObject.ItemSendsGeometryChanges
         )
-        self.setCacheMode(QGraphicsObject.DeviceCoordinateCache)
+        self.setCacheMode(QGraphicsObject.ItemCoordinateCache)
         self._press_pos: QPointF | None = None
         self._selection_offsets: list[tuple["Card", QPointF]] = []
+        self.setAcceptHoverEvents(True)
+        self.setTransformOriginPoint(self.w / 2, self.h / 2)
+
+        self._hover_scale = 1.0
+        self._hover_offset = 0.0
+        self._hover_shadow_enabled = False
+
+        self._hover_animation = QVariantAnimation(self)
+        self._hover_animation.setDuration(HOVER_ANIMATION_DURATION_MS)
+        self._hover_animation.valueChanged.connect(self._apply_hover_scale)
+
+        self._hover_offset_animation = QVariantAnimation(self)
+        self._hover_offset_animation.setDuration(HOVER_OSCILLATION_DURATION_MS)
+        self._hover_offset_animation.valueChanged.connect(self._apply_hover_offset)
+
+        self._hover_offset_return_animation = QVariantAnimation(self)
+        self._hover_offset_return_animation.setDuration(HOVER_ANIMATION_DURATION_MS)
+        self._hover_offset_return_animation.valueChanged.connect(self._apply_hover_offset)
 
     def _back_pixmap(self) -> QPixmap | None:
         """Return a pre-scaled back pixmap for (w,h). Cache per size."""
@@ -83,6 +111,20 @@ class Card(QGraphicsObject):
 
         # Choose face based on pass
         face_down = (Card.render_target == "camera" and not self.visible)
+
+        if self._hover_shadow_enabled:
+            painter.save()
+            painter.setRenderHint(QPainter.Antialiasing, True)
+            painter.setPen(Qt.NoPen)
+            painter.setBrush(QBrush(HOVER_SHADOW_COLOR))
+            shadow_rect = r.adjusted(
+                -HOVER_SHADOW_EXPANSION,
+                -HOVER_SHADOW_EXPANSION,
+                HOVER_SHADOW_EXPANSION,
+                HOVER_SHADOW_EXPANSION,
+            ).translated(HOVER_SHADOW_OFFSET_X, HOVER_SHADOW_OFFSET_Y)
+            painter.drawRoundedRect(shadow_rect, 32, 32)
+            painter.restore()
 
         if face_down:
             back = self._back_pixmap()
@@ -137,6 +179,20 @@ class Card(QGraphicsObject):
         self._selection_offsets.clear()
         super().mouseReleaseEvent(ev)
 
+    def hoverEnterEvent(self, ev):
+        self._start_hover_animation(HOVER_SCALE_FACTOR)
+        self._start_hover_oscillation()
+        self._hover_shadow_enabled = True
+        self.update()
+        super().hoverEnterEvent(ev)
+
+    def hoverLeaveEvent(self, ev):
+        self._start_hover_animation(1.0)
+        self._stop_hover_oscillation()
+        self._hover_shadow_enabled = False
+        self.update()
+        super().hoverLeaveEvent(ev)
+
     def itemChange(self, change, value):
         # Clamp while moving
         if change == QGraphicsObject.GraphicsItemChange.ItemPositionChange and self.scene():
@@ -151,3 +207,63 @@ class Card(QGraphicsObject):
             self.moved.emit(self.pos())
 
         return super().itemChange(change, value)
+
+    def _start_hover_animation(self, target_scale: float):
+        self._hover_animation.stop()
+        self._hover_animation.setStartValue(self._hover_scale)
+        self._hover_animation.setEndValue(target_scale)
+        self._hover_animation.start()
+
+    def _apply_hover_scale(self, value: float):
+        self._hover_scale = float(value)
+        self._update_hover_transform()
+
+    def _start_hover_oscillation(self):
+        # self._hover_offset_return_animation.stop()
+        # self._hover_offset_animation.stop()
+        # self._apply_hover_offset(0.0)
+        # self._hover_offset_animation.setLoopCount(-1)
+        # self._hover_offset_animation.setStartValue(0.0)
+        # self._hover_offset_animation.setEndValue(0.0)
+        # self._hover_offset_animation.setKeyValueAt(0.5, -HOVER_OSCILLATION_OFFSET)
+        # self._hover_offset_animation.start()
+        self._hover_offset_return_animation.stop()
+        self._hover_offset_animation.stop()
+        # Oscillate smoothly between 0 and -offset and back
+        self._apply_hover_offset(0.0)
+        self._hover_offset_animation.setLoopCount(-1)
+        self._hover_offset_animation.setStartValue(0.0)
+        self._hover_offset_animation.setKeyValueAt(0.5, -HOVER_OSCILLATION_OFFSET)
+        self._hover_offset_animation.setEndValue(0.0)
+        self._hover_offset_animation.setEasingCurve(QEasingCurve.InOutSine)
+        self._hover_offset_animation.start()
+
+
+    def _stop_hover_oscillation(self):
+        self._hover_offset_animation.stop()
+        self._hover_offset_return_animation.stop()
+        if self._hover_offset == 0.0:
+            return
+        self._hover_offset_return_animation.setStartValue(self._hover_offset)
+        self._hover_offset_return_animation.setEndValue(0.0)
+        self._hover_offset_return_animation.start()
+
+    def _apply_hover_offset(self, value: float):
+        self._hover_offset = float(value)
+        self._update_hover_transform()
+        self.update()
+
+    def _update_hover_transform(self):
+        origin = self.transformOriginPoint()
+        transform = QTransform()
+        # transform.translate(origin.x(), origin.y())
+        # transform.scale(self._hover_scale, self._hover_scale)
+        # transform.translate(-origin.x(), -origin.y())
+        # if self._hover_offset != 0.0:
+        #     transform.translate(0, self._hover_offset)
+        if self._hover_offset:
+            transform.translate(0, self._hover_offset)
+        transform.translate(origin.x(), origin.y())
+        transform.scale(self._hover_scale, self._hover_scale)
+        transform.translate(-origin.x(), -origin.y())
+        self.setTransform(transform)
