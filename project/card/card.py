@@ -10,9 +10,9 @@ HOVER_ANIMATION_DURATION_MS = 100
 HOVER_OSCILLATION_OFFSET = 8
 HOVER_OSCILLATION_DURATION_MS = 1200
 HOVER_SHADOW_COLOR = QColor(0, 0, 0, 120)
-HOVER_SHADOW_OFFSET_X = 128
-HOVER_SHADOW_OFFSET_Y = 64
-HOVER_SHADOW_EXPANSION = 24
+HOVER_SHADOW_OFFSET_X = 8
+HOVER_SHADOW_OFFSET_Y = 8
+HOVER_SHADOW_EXPANSION = 4
 
 
 class Card(QGraphicsObject):
@@ -52,7 +52,7 @@ class Card(QGraphicsObject):
             | QGraphicsObject.ItemIsSelectable
             | QGraphicsObject.ItemSendsGeometryChanges
         )
-        # Default: cache in item coordinates; switch to NoCache while animating
+        # Default cache; switched to NoCache during hover scale/offset animation
         self.setCacheMode(QGraphicsObject.ItemCoordinateCache)
 
         self._press_pos: QPointF | None = None
@@ -127,6 +127,7 @@ class Card(QGraphicsObject):
     # ------- Painting -------
 
     def boundingRect(self) -> QRectF:
+        """Union of card and its potential shadow footprint."""
         base = QRectF(0, 0, self.w, self.h)
         shadow = base.adjusted(
             -HOVER_SHADOW_EXPANSION,
@@ -137,7 +138,8 @@ class Card(QGraphicsObject):
         return base.united(shadow)
 
     def paint(self, painter: QPainter, option, widget=None):
-        r = self.boundingRect()
+        # Always build geometry from the base rect so painting stays inside boundingRect()
+        base = QRectF(0, 0, self.w, self.h)
 
         # Choose face based on pass
         face_down = (Card.render_target == "camera" and not self.visible)
@@ -147,13 +149,13 @@ class Card(QGraphicsObject):
             painter.setRenderHint(QPainter.Antialiasing, True)
             painter.setPen(Qt.NoPen)
             painter.setBrush(QBrush(HOVER_SHADOW_COLOR))
-            shadow_rect = r.adjusted(
+            shadow_rect = base.adjusted(
                 -HOVER_SHADOW_EXPANSION,
                 -HOVER_SHADOW_EXPANSION,
                 HOVER_SHADOW_EXPANSION,
                 HOVER_SHADOW_EXPANSION,
             ).translated(HOVER_SHADOW_OFFSET_X, HOVER_SHADOW_OFFSET_Y)
-            painter.drawRoundedRect(shadow_rect, 32, 32)
+            painter.drawRoundedRect(shadow_rect, 8, 8)
             painter.restore()
 
         if face_down:
@@ -168,10 +170,10 @@ class Card(QGraphicsObject):
         else:
             painter.setPen(QPen(Qt.black, 1))
             painter.setBrush(QBrush(self.color))
-            painter.drawRoundedRect(r, 8, 8)
+            painter.drawRoundedRect(base, 8, 8)
             painter.setBrush(QBrush(QColor(210, 210, 210)))
             painter.drawRoundedRect(QRectF(0, 0, self.w, 20), 8, 8)
-            painter.drawText(r.adjusted(6, 22, -6, -6),
+            painter.drawText(base.adjusted(6, 22, -6, -6),
                              Qt.AlignLeft | Qt.AlignTop, self.card_id)
 
         # Hide selection chrome in camera pass
@@ -179,7 +181,7 @@ class Card(QGraphicsObject):
             painter.setRenderHint(QPainter.Antialiasing, True)
             painter.setPen(QPen(QColor(0, 120, 215), 2))
             painter.setBrush(Qt.NoBrush)
-            painter.drawRoundedRect(r.adjusted(1, 1, -1, -1), 8, 8)
+            painter.drawRoundedRect(base.adjusted(1, 1, -1, -1), 8, 8)
 
     # ------- Interaction -------
 
@@ -268,7 +270,6 @@ class Card(QGraphicsObject):
 
     def setHoverOffset(self, v: float):
         self._hover_offset = float(v)
-        print(f"hover offset -> {self._hover_offset:.2f}")  # temporary
         self._update_hover_transform()
         self.update()
 
