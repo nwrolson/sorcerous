@@ -52,26 +52,22 @@ class InsertIntoZoneCommand(QUndoCommand):
 
     def _apply_insert(self):
         if self.prev_container != 'table' and self.prev_zone:
-            self.prev_zone.cards.remove(self.card)
-        self.zone.cards.insert(self.index, self.card)
+            self.prev_zone.remove_card(self.card)
+        self.zone.insert_card(self.index, self.card)
         self.model.containers[self.card.card_id] = self.zone.zone_id
         self.model.zones[self.zone.zone_id]["order"] = [c.card_id for c in self.zone.cards]
-        for i,c in enumerate(self.zone.cards):
-            c.setPos(self.zone.pos_for(i))
 
     def _apply_revert(self):
         if self.card in self.zone.cards:
-            self.zone.cards.remove(self.card)
+            self.zone.remove_card(self.card)
         if self.prev_container == 'table':
             self.model.containers[self.card.card_id] = 'table'
             self.card.setPos(self.table_pos)
         else:
             if self.prev_zone is not None and self.prev_index is not None:
-                self.prev_zone.cards.insert(self.prev_index, self.card)
+                self.prev_zone.insert_card(self.prev_index, self.card)
                 self.model.containers[self.card.card_id] = self.prev_zone.zone_id
                 self.model.zones[self.prev_zone.zone_id]["order"] = [c.card_id for c in self.prev_zone.cards]
-                for i,c in enumerate(self.prev_zone.cards):
-                    c.setPos(self.prev_zone.pos_for(i))
 
     def redo(self):
         self._apply_insert()
@@ -91,17 +87,13 @@ class RemoveFromZoneCommand(QUndoCommand):
 
     def redo(self):
         if self.card in self.zone.cards:
-            self.zone.cards.remove(self.card)
+            self.zone.remove_card(self.card)
         self.model.containers[self.card.card_id] = 'table'
         self.model.zones[self.zone.zone_id]["order"] = [c.card_id for c in self.zone.cards]
-        for i,c in enumerate(self.zone.cards):
-            c.setPos(self.zone.pos_for(i))
         self.card.setPos(self.to_table_pos)
         self.model.cards[self.card.card_id]["pos"] = self.to_table_pos
 
     def undo(self):
-        self.zone.cards.insert(self.index, self.card)
+        self.zone.insert_card(self.index, self.card)
         self.model.containers[self.card.card_id] = self.zone.zone_id
         self.model.zones[self.zone.zone_id]["order"] = [c.card_id for c in self.zone.cards]
-        for i,c in enumerate(self.zone.cards):
-            c.setPos(self.zone.pos_for(i))

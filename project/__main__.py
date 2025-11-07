@@ -55,14 +55,15 @@ class MainWindow(QMainWindow):
         self._capture_interval = 1.0 / 60.0  # seconds
 
         # Populate items
-        zone = Zone("zone_A")
-        self.scene.add_zone(zone, QPointF(760, 40))
+        self.hand_zone = Zone("hand", slot_h=160, padding=16,
+                              orientation="horizontal", hide_cards=True)
+        self.scene.add_zone(self.hand_zone, QPointF(0, 0))
 
         cols = 4
         spacing = QPointF(150, 120)
         start = QPointF(40, 40)
         for i in range(2):
-            c = Card(f"Card {i+1}", image_path=r'scryfall-cache\\9ED\\100\\front.png', w=745*0.5, h= 1040*0.5, visible=False)
+            c = Card(f"Card {i+1}", image_path=r'scryfall-cache\\9ED\\100\\front.png', w=745*0.25, h= 1040*0.25, visible=True)
             c.set_card_back(BACK_IMAGE)
             pos = start + QPointF((i % cols)*spacing.x(),
                                    (i // cols)*spacing.y())
@@ -186,6 +187,16 @@ class MainWindow(QMainWindow):
         view_src = self.view.mapToScene(self.view.viewport().rect()).boundingRect()
         margin = 12.0
         self.scene.setSceneRect(view_src.adjusted(-margin, -margin, margin, margin))
+        self._layout_hand_zone()
+
+    def _layout_hand_zone(self):
+        if not hasattr(self, "hand_zone"):
+            return
+        view_rect = self.view.mapToScene(self.view.viewport().rect()).boundingRect()
+        if view_rect.isNull() or view_rect.width() <= 0:
+            return
+        self.hand_zone.set_width(view_rect.width())
+        self.hand_zone.set_bottom_anchor(view_rect.left(), view_rect.bottom())
 
     def _wrap_release(self, original_release, card: Card):
         def handler(ev):

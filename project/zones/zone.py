@@ -13,19 +13,27 @@ from PySide6.QtGui import (
 from card.card import Card
 
 class Zone(QGraphicsObject):
-    def __init__(self, zone_id: str, width: float=160, slot_h: float=90, padding: float=8):
+    def __init__(self, zone_id: str, width: float=160, slot_h: float=90,
+                 padding: float=8, orientation: str="vertical", hide_cards: bool=False):
         super().__init__()
         self.zone_id = zone_id
         self.width = width
         self.slot_h = slot_h
         self.padding = padding
+        self.orientation = orientation
+        self.hide_cards = hide_cards
         self.cards: list[Card] = []
         self.highlight = False
+        self.anchor_left: float | None = None
+        self.anchor_bottom: float | None = None
         self.setCacheMode(QGraphicsObject.CacheMode.DeviceCoordinateCache)
         self.setAcceptedMouseButtons(Qt.NoButton)
 
     def boundingRect(self) -> QRectF:
-        total_h = max(self.slot_h * max(1,len(self.cards)), self.slot_h)
+        if self.orientation == "vertical":
+            total_h = max(self.slot_h * max(1,len(self.cards)), self.slot_h)
+        else:
+            total_h = self.slot_h
         return QRectF(0,0,self.width, total_h)
 
     def paint(self, painter, option, widget=None):
@@ -34,17 +42,82 @@ class Zone(QGraphicsObject):
         painter.setBrush(QBrush(bg))
         painter.setPen(QPen(QColor(160,160,120),1,Qt.DashLine))
         painter.drawRoundedRect(r, 10, 10)
-        painter.setPen(QPen(QColor(200,200,180),1))
-        y = self.padding
-        for _ in range(max(1, len(self.cards))):
-            painter.drawLine(QLineF(6, y, self.width-6, y))
-            y += self.slot_h
+        if self.orientation == "vertical":
+            painter.setPen(QPen(QColor(200,200,180),1))
+            y = self.padding
+            for _ in range(max(1, len(self.cards))):
+                painter.drawLine(QLineF(6, y, self.width-6, y))
+                y += self.slot_h
 
     def index_at(self, scene_pos: QPointF) -> int:
-        y = self.mapFromScene(scene_pos).y() - self.padding
-        idx = int(max(0, y // self.slot_h))
-        return min(idx, len(self.cards))
+        local = self.mapFromScene(scene_pos)
+        if self.orientation == "vertical":
+            y = local.y() - self.padding
+            idx = int(max(0, y // self.slot_h))
+            return min(idx, len(self.cards))
+        else:
+            x = local.x() - self.padding
+            if x <= 0:
+                return 0
+            pos = self.padding
+            for i, card in enumerate(self.cards):
+                w = card.boundingRect().width()
+                midpoint = pos + w / 2.0
+                if x < midpoint:
+                    return i
+                pos += w + self.padding
+            return len(self.cards)
 
     def pos_for(self, index: int) -> QPointF:
-        y = self.padding + index * self.slot_h
-        return self.mapToScene(QPointF(self.padding, y))
+        if self.orientation == "vertical":
+            y = self.padding + index * self.slot_h
+            return self.mapToScene(QPointF(self.padding, y))
+        x = self.padding
+        for card in self.cards[:index]:
+            x += card.boundingRect().width() + self.padding
+        return self.mapToScene(QPointF(x, self.padding))
+
+    def set_width(self, width: float):
+        if width == self.width:
+            return
+        self.prepareGeometryChange()
+        self.width = width
+        self.update()
+        self.reflow_cards()
+
+    def set_bottom_anchor(self, left: float, bottom: float):
+        self.anchor_left = left
+        self.anchor_bottom = bottom
+        self.reflow_cards()
+
+    def insert_card(self, index: int, card: Card):
+        self.prepareGeometryChange()
+        idx = max(0, min(index, len(self.cards)))
+        self.cards.insert(idx, card)
+        if self.hide_cards and card.visible:
+            card.visible = False
+            card.update()
+        self.reflow_cards()
+
+    def remove_card(self, card: Card):
+        if card not in self.cards:
+            return
+        self.prepareGeometryChange()
+        self.cards.remove(card)
+        if self.hide_cards and not card.visible:
+            card.visible = True
+            card.update()
+        self.reflow_cards()
+
+    def reflow_cards(self):
+        self._update_anchor_pos()
+        for i, c in enumerate(self.cards):
+            c.setPos(self.pos_for(i))
+
+    def _update_anchor_pos(self):
+        if self.anchor_left is None or self.anchor_bottom is None:
+            return
+        zone_height = self.boundingRect().height()
+        desired = QPointF(self.anchor_left, self.anchor_bottom - zone_height)
+        if self.pos() != desired:
+            self.setPos(desired)

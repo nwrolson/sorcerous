@@ -49,9 +49,11 @@ class BoardScene(QGraphicsScene):
                 self.hover_zone.update()
 
     def _hover_zone_for(self, card: Card) -> Zone | None:
-        center = card.mapToScene(card.boundingRect().center())
-        items = self.items(center)
+        card_rect = card.mapToScene(card.boundingRect()).boundingRect()
+        items = self.items(card_rect, Qt.ItemSelectionMode.IntersectsItemShape)
         for it in items:
+            if it is card:
+                continue
             if isinstance(it, Zone):
                 return it
         return None
