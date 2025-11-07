@@ -8,7 +8,7 @@ from PySide6.QtCore import (
 )
 from PySide6.QtGui import QImage, QUndoStack, QPainter
 from PySide6.QtWidgets import (
-    QApplication, QMainWindow, QFrame
+    QApplication, QMainWindow, QFrame, QGraphicsView
 )
 
 from scene.board import BoardScene, BoardView
@@ -38,6 +38,7 @@ class MainWindow(QMainWindow):
         self.setCentralWidget(self.view)
         self.view.setFrameShape(QFrame.NoFrame)
         self.view.setViewportMargins(0, 0, 0, 0)
+        self.view.setViewportUpdateMode(QGraphicsView.BoundingRectViewportUpdate)
         self.view.setAlignment(Qt.AlignLeft | Qt.AlignTop)
 
         self.view.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)

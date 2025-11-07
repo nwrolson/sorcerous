@@ -1,4 +1,7 @@
-from PySide6.QtCore import Qt, QRectF, QPointF, Signal, QVariantAnimation, QEasingCurve
+from PySide6.QtCore import (
+    Qt, QRectF, QPointF, Signal, QVariantAnimation, QEasingCurve,
+    QSequentialAnimationGroup, QPropertyAnimation, Property
+)
 from PySide6.QtWidgets import QGraphicsObject
 from PySide6.QtGui import QBrush, QColor, QPen, QPixmap, QPainter, QTransform
 
@@ -16,7 +19,7 @@ class Card(QGraphicsObject):
     # Render target for all Card paints: "screen" or "camera"
     render_target = "screen"
     # Shared card back cache (pre-scaled per (w,h) on demand)
-    _back_cache: dict[tuple[int,int], QPixmap] = {}
+    _back_cache: dict[tuple[int, int], QPixmap] = {}
 
     moved = Signal(QPointF)
 
@@ -38,16 +41,20 @@ class Card(QGraphicsObject):
         if image_path:
             src = QPixmap(image_path)
             if not src.isNull():
-                self.pixmap = src.scaled(int(w), int(h),
-                                         Qt.IgnoreAspectRatio,
-                                         Qt.SmoothTransformation)
+                self.pixmap = src.scaled(
+                    int(w), int(h),
+                    Qt.IgnoreAspectRatio,
+                    Qt.SmoothTransformation
+                )
 
         self.setFlags(
             QGraphicsObject.ItemIsMovable
             | QGraphicsObject.ItemIsSelectable
             | QGraphicsObject.ItemSendsGeometryChanges
         )
+        # Default: cache in item coordinates; switch to NoCache while animating
         self.setCacheMode(QGraphicsObject.ItemCoordinateCache)
+
         self._press_pos: QPointF | None = None
         self._selection_offsets: list[tuple["Card", QPointF]] = []
         self.setAcceptHoverEvents(True)
@@ -57,17 +64,31 @@ class Card(QGraphicsObject):
         self._hover_offset = 0.0
         self._hover_shadow_enabled = False
 
+        # Scale animation
         self._hover_animation = QVariantAnimation(self)
         self._hover_animation.setDuration(HOVER_ANIMATION_DURATION_MS)
         self._hover_animation.valueChanged.connect(self._apply_hover_scale)
 
-        self._hover_offset_animation = QVariantAnimation(self)
-        self._hover_offset_animation.setDuration(HOVER_OSCILLATION_DURATION_MS)
-        self._hover_offset_animation.valueChanged.connect(self._apply_hover_offset)
+        # Vertical wobble: property animations in a ping-pong group
+        self._hover_group = QSequentialAnimationGroup(self)
 
-        self._hover_offset_return_animation = QVariantAnimation(self)
-        self._hover_offset_return_animation.setDuration(HOVER_ANIMATION_DURATION_MS)
-        self._hover_offset_return_animation.valueChanged.connect(self._apply_hover_offset)
+        self._hover_up = QPropertyAnimation(self, b"hoverOffset")
+        self._hover_up.setDuration(HOVER_OSCILLATION_DURATION_MS // 2)
+        self._hover_up.setStartValue(0.0)
+        self._hover_up.setEndValue(-float(HOVER_OSCILLATION_OFFSET))
+        self._hover_up.setEasingCurve(QEasingCurve.InOutSine)
+
+        self._hover_down = QPropertyAnimation(self, b"hoverOffset")
+        self._hover_down.setDuration(HOVER_OSCILLATION_DURATION_MS // 2)
+        self._hover_down.setStartValue(-float(HOVER_OSCILLATION_OFFSET))
+        self._hover_down.setEndValue(0.0)
+        self._hover_down.setEasingCurve(QEasingCurve.InOutSine)
+
+        self._hover_group.addAnimation(self._hover_up)
+        self._hover_group.addAnimation(self._hover_down)
+        self._hover_group.setLoopCount(-1)
+
+    # ------- Assets -------
 
     def _back_pixmap(self) -> QPixmap | None:
         """Return a pre-scaled back pixmap for (w,h). Cache per size."""
@@ -103,8 +124,17 @@ class Card(QGraphicsObject):
         # trigger redraws when toggling between passes
         self.update()
 
+    # ------- Painting -------
+
     def boundingRect(self) -> QRectF:
-        return QRectF(0, 0, self.w, self.h)
+        base = QRectF(0, 0, self.w, self.h)
+        shadow = base.adjusted(
+            -HOVER_SHADOW_EXPANSION,
+            -HOVER_SHADOW_EXPANSION,
+            HOVER_SHADOW_EXPANSION,
+            HOVER_SHADOW_EXPANSION,
+        ).translated(HOVER_SHADOW_OFFSET_X, HOVER_SHADOW_OFFSET_Y)
+        return base.united(shadow)
 
     def paint(self, painter: QPainter, option, widget=None):
         r = self.boundingRect()
@@ -151,6 +181,8 @@ class Card(QGraphicsObject):
             painter.setBrush(Qt.NoBrush)
             painter.drawRoundedRect(r.adjusted(1, 1, -1, -1), 8, 8)
 
+    # ------- Interaction -------
+
     def mousePressEvent(self, ev):
         if ev.button() == Qt.LeftButton:
             self._press_pos = ev.scenePos()
@@ -181,22 +213,32 @@ class Card(QGraphicsObject):
 
     def hoverEnterEvent(self, ev):
         self._start_hover_animation(HOVER_SCALE_FACTOR)
-        self._start_hover_oscillation()
         self._hover_shadow_enabled = True
+        # ensure transform changes are visible while animating
+        self.setCacheMode(QGraphicsObject.NoCache)
+        self._hover_group.start()
         self.update()
         super().hoverEnterEvent(ev)
 
     def hoverLeaveEvent(self, ev):
         self._start_hover_animation(1.0)
-        self._stop_hover_oscillation()
         self._hover_shadow_enabled = False
+        self._hover_group.stop()
+        # ease back to y=0 in case we stopped mid-cycle
+        ret = QPropertyAnimation(self, b"hoverOffset")
+        ret.setDuration(HOVER_ANIMATION_DURATION_MS)
+        ret.setStartValue(self._hover_offset)
+        ret.setEndValue(0.0)
+        ret.setEasingCurve(QEasingCurve.InOutSine)
+        ret.finished.connect(lambda: self.setCacheMode(QGraphicsObject.ItemCoordinateCache))
+        ret.start(QPropertyAnimation.DeleteWhenStopped)
         self.update()
         super().hoverLeaveEvent(ev)
 
     def itemChange(self, change, value):
         # Clamp while moving
         if change == QGraphicsObject.GraphicsItemChange.ItemPositionChange and self.scene():
-            new_pos = QPointF(value)  # value is the proposed pos in scene coords
+            new_pos = QPointF(value)  # proposed pos in scene coords
             rect = self.scene().sceneRect()
             x = max(rect.left(),  min(new_pos.x(), rect.right()  - self.w))
             y = max(rect.top(),   min(new_pos.y(), rect.bottom() - self.h))
@@ -208,6 +250,8 @@ class Card(QGraphicsObject):
 
         return super().itemChange(change, value)
 
+    # ------- Animations -------
+
     def _start_hover_animation(self, target_scale: float):
         self._hover_animation.stop()
         self._hover_animation.setStartValue(self._hover_scale)
@@ -218,52 +262,25 @@ class Card(QGraphicsObject):
         self._hover_scale = float(value)
         self._update_hover_transform()
 
-    def _start_hover_oscillation(self):
-        # self._hover_offset_return_animation.stop()
-        # self._hover_offset_animation.stop()
-        # self._apply_hover_offset(0.0)
-        # self._hover_offset_animation.setLoopCount(-1)
-        # self._hover_offset_animation.setStartValue(0.0)
-        # self._hover_offset_animation.setEndValue(0.0)
-        # self._hover_offset_animation.setKeyValueAt(0.5, -HOVER_OSCILLATION_OFFSET)
-        # self._hover_offset_animation.start()
-        self._hover_offset_return_animation.stop()
-        self._hover_offset_animation.stop()
-        # Oscillate smoothly between 0 and -offset and back
-        self._apply_hover_offset(0.0)
-        self._hover_offset_animation.setLoopCount(-1)
-        self._hover_offset_animation.setStartValue(0.0)
-        self._hover_offset_animation.setKeyValueAt(0.5, -HOVER_OSCILLATION_OFFSET)
-        self._hover_offset_animation.setEndValue(0.0)
-        self._hover_offset_animation.setEasingCurve(QEasingCurve.InOutSine)
-        self._hover_offset_animation.start()
+    # Property used by QPropertyAnimation
+    def getHoverOffset(self) -> float:
+        return self._hover_offset
 
-
-    def _stop_hover_oscillation(self):
-        self._hover_offset_animation.stop()
-        self._hover_offset_return_animation.stop()
-        if self._hover_offset == 0.0:
-            return
-        self._hover_offset_return_animation.setStartValue(self._hover_offset)
-        self._hover_offset_return_animation.setEndValue(0.0)
-        self._hover_offset_return_animation.start()
-
-    def _apply_hover_offset(self, value: float):
-        self._hover_offset = float(value)
+    def setHoverOffset(self, v: float):
+        self._hover_offset = float(v)
+        print(f"hover offset -> {self._hover_offset:.2f}")  # temporary
         self._update_hover_transform()
         self.update()
 
+    hoverOffset = Property(float, fget=getHoverOffset, fset=setHoverOffset)
+
     def _update_hover_transform(self):
         origin = self.transformOriginPoint()
-        transform = QTransform()
-        # transform.translate(origin.x(), origin.y())
-        # transform.scale(self._hover_scale, self._hover_scale)
-        # transform.translate(-origin.x(), -origin.y())
-        # if self._hover_offset != 0.0:
-        #     transform.translate(0, self._hover_offset)
+        t = QTransform()
+        # translate first (local space), then scale about center
         if self._hover_offset:
-            transform.translate(0, self._hover_offset)
-        transform.translate(origin.x(), origin.y())
-        transform.scale(self._hover_scale, self._hover_scale)
-        transform.translate(-origin.x(), -origin.y())
-        self.setTransform(transform)
+            t.translate(0, self._hover_offset)
+        t.translate(origin.x(), origin.y())
+        t.scale(self._hover_scale, self._hover_scale)
+        t.translate(-origin.x(), -origin.y())
+        self.setTransform(t)
