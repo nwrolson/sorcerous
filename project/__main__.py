@@ -82,7 +82,7 @@ class MainWindow(QMainWindow):
         )
         self.spawner.spawnFailed.connect(self._handle_spawn_failure)
         self.spawner.spawnCompleted.connect(
-            lambda _: self.loading_spinner.finish()
+            lambda *_: self.loading_spinner.finish()
         )
         self.load_menu.importRequested.connect(self._on_import_requested)
 
@@ -270,22 +270,52 @@ class MainWindow(QMainWindow):
                 self._on_card_action()
         return handler
 
-    @Slot(str)
-    def _on_import_requested(self, payload: str) -> None:
-        accepted = self.spawner.handle_import_signal(payload)
+    @Slot(str, str)
+    def _on_import_requested(self, payload: str, target_zone: str) -> None:
+        accepted = self.spawner.handle_import_signal(payload, target_zone)
         if accepted:
             self._position_loading_spinner()
             self.loading_spinner.start()
         else:
             self.loading_spinner.finish(immediate=True)
 
-    def _handle_spawned_cards(self, cards: list[Card]) -> None:
+    def _handle_spawned_cards(self, cards: list[Card], target_zone: str) -> None:
+        if not cards:
+            return
+        placed_in_zone = self._place_cards_in_zone(cards, target_zone)
+        if not placed_in_zone:
+            self._layout_cards_on_table(cards)
+        self._on_card_action()
+
+    def _place_cards_in_zone(self, cards: list[Card], zone_id: str) -> bool:
+        if not zone_id or zone_id == "table":
+            return False
+        zone = self.scene.zones.get(zone_id)
+        if zone is None:
+            return False
+
+        for card in cards:
+            # Add to scene so zone can take ownership and hide/reflow as needed.
+            self.scene.add_card(card, zone.pos())
+            insert_at = len(zone.cards)
+            zone.insert_card(insert_at, card)
+            self.scene.model.containers[card.card_id] = zone.zone_id
+
+        zone_order = [c.card_id for c in zone.cards]
+        self.scene.model.zones[zone.zone_id]["order"] = zone_order
+        for card in zone.cards:
+            self.scene.model.cards[card.card_id]["pos"] = card.pos()
+        return True
+
+    def _layout_cards_on_table(self, cards: list[Card]) -> None:
         if not cards:
             return
         cols = 5
         spacing = QPointF(150, 210)
         start = QPointF(40, 40)
-        existing_cards = sum(1 for item in self.scene.items() if isinstance(item, Card))
+        existing_cards = sum(
+            1 for container in self.scene.model.containers.values() if container == "table"
+        )
         for offset, card in enumerate(cards):
             idx = existing_cards + offset
             col = idx % cols
@@ -295,7 +325,6 @@ class MainWindow(QMainWindow):
                 start.y() + row * spacing.y(),
             )
             self.scene.add_card(card, pos)
-        self._on_card_action()
 
     def _handle_spawn_failure(self, message: str) -> None:
         self.loading_spinner.finish(immediate=True)

@@ -16,6 +16,7 @@ class LoadMenu(QWidget):
 
     PRIMARY_OPTIONS = ("Load Deck", "Import Cards")
     IMPORT_OPTIONS = ("From Clipboard", "From File", "From URL")
+    DEFAULT_IMPORT_ZONE = "library"
 
     _MENU_MARGIN = 12
     _LIST_SPACING = 16
@@ -29,7 +30,8 @@ class LoadMenu(QWidget):
         / "Almendra-Regular.ttf"
     )
 
-    importRequested = Signal(str)
+    # payload text, target zone id
+    importRequested = Signal(str, str)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -111,7 +113,7 @@ class LoadMenu(QWidget):
                 self.hide()
         if loaded_string:
             print("[LoadMenu] Emitting importRequested signal")
-            self.importRequested.emit(loaded_string)
+            self.importRequested.emit(loaded_string, self.DEFAULT_IMPORT_ZONE)
 
     def _toggle_import_menu(self, show: bool):
         currently_visible = self.import_list.isVisible()

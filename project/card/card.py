@@ -22,6 +22,7 @@ class Card(QGraphicsObject):
     _back_cache: dict[tuple[int, int], QPixmap] = {}
 
     moved = Signal(QPointF)
+    zone = ""
 
     def __init__(self, card_id: str, image_path: str = None,
                  w: float = 120, h: float = 80,

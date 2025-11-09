@@ -15,8 +15,8 @@ from loader.loader import DeckLoader, DeckLoaderError
 class CardSpawner(QObject):
     spawnProgress = Signal(str)
     spawnFailed = Signal(str)
-    spawnCompleted = Signal(list)
-    jobsReady = Signal(list)
+    spawnCompleted = Signal(list, str)
+    jobsReady = Signal(list, str)
     """
     Helper that fetches card assets and instantiates `Card` objects while
     tracking every spawn within the current session.
@@ -31,7 +31,7 @@ class CardSpawner(QObject):
         default_height: float = 80.0,
         default_back_image_path: Optional[str] = None,
         deck_loader: Optional[DeckLoader] = None,
-        on_cards_spawned: Optional[Callable[[list[Card]], None]] = None,
+        on_cards_spawned: Optional[Callable[[list[Card], str], None]] = None,
     ) -> None:
         super().__init__(parent)
         self._cache = cache
@@ -193,9 +193,9 @@ class CardSpawner(QObject):
             return []
         return self._instantiate_cards(results)
 
-    def handle_import_signal(self, payload: str) -> bool:
+    def handle_import_signal(self, payload: str, target_zone: str = "library") -> bool:
         """
-        Slot-friendly wrapper that loads + spawns cards, then notifies a callback.
+        Slot-friendly wrapper that loads + spawns cards for the requested zone.
         Returns True if the request was accepted and work enqueued.
         """
         with self._thread_lock:
@@ -206,7 +206,7 @@ class CardSpawner(QObject):
                 return False
             worker = threading.Thread(
                 target=self._run_spawn_job,
-                args=(payload,),
+                args=(payload, target_zone),
                 daemon=True,
                 name="CardSpawnerWorker",
             )
@@ -214,7 +214,7 @@ class CardSpawner(QObject):
         worker.start()
         return True
 
-    def _run_spawn_job(self, payload: str) -> None:
+    def _run_spawn_job(self, payload: str, target_zone: str) -> None:
         self._report_progress("Starting background spawn job.")
         try:
             results = self._prepare_spawn_jobs(payload, self._report_progress)
@@ -230,15 +230,15 @@ class CardSpawner(QObject):
             self._report_progress(
                 f"Prepared {len(results)} card asset bundle(s); dispatching to UI thread."
             )
-            self.jobsReady.emit(results)
+            self.jobsReady.emit(results, target_zone)
         finally:
             with self._thread_lock:
                 self._active_thread = None
 
-    def _on_jobs_ready(self, results: list[CacheResult]) -> None:
+    def _on_jobs_ready(self, results: list[CacheResult], target_zone: str) -> None:
         cards = self._instantiate_cards(results)
         self._report_progress(f"Instantiated {len(cards)} card(s) on UI thread.")
-        self.spawnCompleted.emit(cards)
+        self.spawnCompleted.emit(cards, target_zone)
 
     @staticmethod
     def _pick_image(
