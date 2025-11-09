@@ -106,6 +106,8 @@ class Zone(QGraphicsObject):
         self.prepareGeometryChange()
         idx = max(0, min(index, len(self.cards)))
         self.cards.insert(idx, card)
+        if hasattr(card, "set_tapped"):
+            card.set_tapped(False)
         if self.hide_cards and card.visible:
             card.visible = False
             card.update()

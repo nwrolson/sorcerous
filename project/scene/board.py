@@ -34,6 +34,7 @@ class BoardScene(QGraphicsScene):
         self.model.ensure_card(card.card_id)
         card.setPos(scene_pos)
         self.model.cards[card.card_id]["pos"] = scene_pos
+        self.model.cards[card.card_id]["tapped"] = card.is_tapped()
         self.model.containers[card.card_id] = "table"
         card.moved.connect(lambda pos, c=card: self._on_card_moved(c))
 
@@ -120,6 +121,8 @@ class BoardScene(QGraphicsScene):
             for offset, card in enumerate(cards):
                 idx = insert_at + offset
                 zone.cards.insert(idx, card)
+                if self.model.containers.get(card.card_id, "table") == "table":
+                    card.set_tapped(False)
                 target = zone.pos_for(idx)
                 card.setPos(target)
         finally:

@@ -2,6 +2,7 @@ from PySide6.QtCore import (
     Qt, QRectF, QPointF, Signal, QVariantAnimation, QEasingCurve,
     QSequentialAnimationGroup, QPropertyAnimation, Property
 )
+# No TYPE_CHECKING import needed; we only access scene attributes dynamically.
 from PySide6.QtWidgets import QGraphicsObject
 from PySide6.QtGui import QBrush, QColor, QPen, QPixmap, QPainter, QTransform
 
@@ -64,6 +65,7 @@ class Card(QGraphicsObject):
         self._hover_scale = 1.0
         self._hover_offset = 0.0
         self._hover_shadow_enabled = False
+        self._tapped = False
 
         # Scale animation
         self._hover_animation = QVariantAnimation(self)
@@ -214,6 +216,14 @@ class Card(QGraphicsObject):
         self._selection_offsets.clear()
         super().mouseReleaseEvent(ev)
 
+    def mouseDoubleClickEvent(self, ev):
+        if ev.button() == Qt.LeftButton and self._can_toggle_tap():
+            self.set_tapped(not self._tapped)
+            self.update()
+            ev.accept()
+            return
+        super().mouseDoubleClickEvent(ev)
+
     def hoverEnterEvent(self, ev):
         self._start_hover_animation(HOVER_SCALE_FACTOR)
         self._hover_shadow_enabled = True
@@ -252,6 +262,29 @@ class Card(QGraphicsObject):
             self.moved.emit(self.pos())
 
         return super().itemChange(change, value)
+
+    # ------- Tap State -------
+
+    def is_tapped(self) -> bool:
+        return self._tapped
+
+    def set_tapped(self, tapped: bool):
+        tapped = bool(tapped)
+        if self._tapped == tapped:
+            return
+        self._tapped = tapped
+        self.setRotation(90.0 if tapped else 0.0)
+        scene = self.scene()
+        if scene and hasattr(scene, "model"):
+            entry = scene.model.cards.setdefault(self.card_id, {})
+            entry["tapped"] = tapped
+
+    def _can_toggle_tap(self) -> bool:
+        scene = self.scene()
+        if not scene or not hasattr(scene, "model"):
+            return True
+        container = scene.model.containers.get(self.card_id, "table")
+        return container == "table"
 
     # ------- Animations -------
 
