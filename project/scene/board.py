@@ -3,14 +3,14 @@ from PySide6.QtGui import (
 )
 
 from PySide6.QtWidgets import (
-    QGraphicsScene, QGraphicsView
+    QGraphicsScene, QGraphicsView, QRubberBand
 )
 
 from PySide6.QtCore import (
-    QPointF, Qt
+    QPoint, QPointF, QRect, Qt
 )
 
-from commands.commands import InsertIntoZoneCommand,RemoveFromZoneCommand
+from commands.commands import InsertIntoZoneCommand, RemoveFromZoneCommand
 from model.board import BoardModel
 from zones.zone import Zone
 from card.card import Card
@@ -59,20 +59,48 @@ class BoardScene(QGraphicsScene):
         return None
 
     def drop_released(self, card: Card):
-        z = self._hover_zone_for(card)
-        in_container = self.model.containers[card.card_id]
-        if z is not None:
-            idx = z.index_at(card.scenePos())
-            cmd = InsertIntoZoneCommand(self.model, self.zones, card, z, idx, table_pos=card.pos())
+        cards = self._selected_cards(card)
+        table_positions = {c.card_id: QPointF(c.pos()) for c in cards}
+        zone = self._hover_zone_for(card)
+        if zone is not None:
+            ordered = self._ordered_cards(cards, zone)
+            idx = zone.index_at(card.scenePos())
+            cmd = InsertIntoZoneCommand(self.model, self.zones, ordered, zone, idx, table_pos=table_positions)
             self.undo.push(cmd)
-        else:
-            if in_container != 'table':
-                prev_zone = self.zones[in_container]
-                idx = prev_zone.cards.index(card)
-                cmd = RemoveFromZoneCommand(self.model, card, prev_zone, idx, to_table_pos=card.pos())
-                self.undo.push(cmd)
-            else:
-                pass
+            return
+
+        removals: list[tuple[Card, Zone, int]] = []
+        for selected in cards:
+            container = self.model.containers.get(selected.card_id, "table")
+            if container == 'table':
+                continue
+            prev_zone = self.zones.get(container)
+            if prev_zone is None:
+                continue
+            prev_index = prev_zone.cards.index(selected) if selected in prev_zone.cards else len(prev_zone.cards)
+            removals.append((selected, prev_zone, prev_index))
+        if removals:
+            cmd = RemoveFromZoneCommand(self.model, removals, table_positions)
+            self.undo.push(cmd)
+
+    def _selected_cards(self, primary: Card) -> list[Card]:
+        selected = [it for it in self.selectedItems() if isinstance(it, Card)]
+        if not selected:
+            selected = [primary]
+        # Preserve current stacking order while removing duplicates
+        unique: list[Card] = []
+        seen = set()
+        for card in selected:
+            if card.card_id in seen:
+                continue
+            seen.add(card.card_id)
+            unique.append(card)
+        return unique
+
+    def _ordered_cards(self, cards: list[Card], zone: Zone | None = None) -> list[Card]:
+        if zone and zone.orientation == "horizontal":
+            return sorted(cards, key=lambda c: (c.scenePos().x(), c.scenePos().y()))
+        return sorted(cards, key=lambda c: (c.scenePos().y(), c.scenePos().x()))
 
 class BoardView(QGraphicsView):
     def __init__(self, scene: BoardScene):
@@ -82,6 +110,10 @@ class BoardView(QGraphicsView):
         self.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self._scale = 1.0
         self.setTransformationAnchor(QGraphicsView.ViewportAnchor.AnchorUnderMouse)
+        self._rubber_band = QRubberBand(QRubberBand.Rectangle, self.viewport())
+        self._rubber_band.hide()
+        self._selection_origin: QPoint | None = None
+        self._drag_selecting = False
 
     def wheelEvent(self, ev):
         if ev.modifiers() & Qt.ControlModifier:
@@ -96,3 +128,54 @@ class BoardView(QGraphicsView):
             self._scale = new_scale
         else:
             super().wheelEvent(ev)
+
+    def mousePressEvent(self, ev):
+        if ev.button() == Qt.LeftButton:
+            item = self.itemAt(ev.position().toPoint())
+            if not isinstance(item, Card):
+                self._begin_drag_select(ev)
+                return
+        super().mousePressEvent(ev)
+
+    def mouseMoveEvent(self, ev):
+        if self._drag_selecting and self._selection_origin is not None:
+            self._update_drag_select(ev.position().toPoint())
+            return
+        super().mouseMoveEvent(ev)
+
+    def mouseReleaseEvent(self, ev):
+        if ev.button() == Qt.LeftButton and self._drag_selecting:
+            self._end_drag_select()
+            return
+        super().mouseReleaseEvent(ev)
+
+    def _begin_drag_select(self, ev):
+        self._drag_selecting = True
+        origin = ev.position().toPoint()
+        self._selection_origin = origin
+        self.scene().clearSelection()
+        self._rubber_band.setGeometry(QRect(origin, origin))
+        self._rubber_band.show()
+
+    def _update_drag_select(self, current_pos: QPoint):
+        if self._selection_origin is None:
+            return
+        rect = QRect(self._selection_origin, current_pos).normalized()
+        self._rubber_band.setGeometry(rect)
+        self._select_cards_in_rect(rect)
+
+    def _end_drag_select(self):
+        self._drag_selecting = False
+        self._selection_origin = None
+        self._rubber_band.hide()
+
+    def _select_cards_in_rect(self, rect: QRect):
+        scene_poly = self.mapToScene(rect)
+        if not scene_poly:
+            self.scene().clearSelection()
+            return
+        scene_rect = scene_poly.boundingRect()
+        self.scene().clearSelection()
+        for item in self.scene().items(scene_rect, Qt.ItemSelectionMode.IntersectsItemShape):
+            if isinstance(item, Card):
+                item.setSelected(True)
