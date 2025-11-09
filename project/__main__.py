@@ -14,6 +14,7 @@ from PySide6.QtCore import (
     Slot,
 )
 from PySide6.QtGui import QImage, QUndoStack, QPainter, QPixmap
+from PySide6.QtSvg import QSvgRenderer
 from PySide6.QtWidgets import (
     QApplication,
     QMainWindow,
@@ -44,11 +45,13 @@ class LoadingSpinner(QWidget):
     def __init__(self, icon_path: Path, parent: QWidget | None = None):
         super().__init__(parent)
         self.setAttribute(Qt.WA_TransparentForMouseEvents)
-        self.setAttribute(Qt.WA_TranslucentBackground)
-        self.setAttribute(Qt.WA_NoSystemBackground)
+        self.setAttribute(Qt.WA_ShowWithoutActivating)
+        self.setAttribute(Qt.WA_StyledBackground, True)
+        self.setAutoFillBackground(False)
+        self.setStyleSheet("background-color: transparent;")
 
-        pixmap = QPixmap(str(icon_path))
-        if pixmap.isNull():
+        pixmap = self._load_icon_pixmap(icon_path)
+        if pixmap is None or pixmap.isNull():
             size = 96
             pixmap = QPixmap(size, size)
             pixmap.fill(Qt.transparent)
@@ -78,10 +81,15 @@ class LoadingSpinner(QWidget):
         self._fade.setEasingCurve(QEasingCurve.InOutQuad)
         self._fade.finished.connect(self._on_fade_finished)
 
+        self._fade_delay = QTimer(self)
+        self._fade_delay.setSingleShot(True)
+        self._fade_delay.timeout.connect(self._begin_fade_out)
+
         self.hide()
 
     def start(self):
         self._fade.stop()
+        self._fade_delay.stop()
         self._effect.setOpacity(1.0)
         self._angle = 0.0
         self._timer.start()
@@ -94,9 +102,15 @@ class LoadingSpinner(QWidget):
             return
         if immediate:
             self._timer.stop()
+            self._fade_delay.stop()
+            self._fade.stop()
             self.hide()
             self._effect.setOpacity(0.0)
             return
+        self._fade_delay.stop()
+        self._fade_delay.start(500)
+
+    def _begin_fade_out(self):
         self._fade.stop()
         self._fade.setStartValue(self._effect.opacity())
         self._fade.setEndValue(0.0)
@@ -126,6 +140,23 @@ class LoadingSpinner(QWidget):
             self._pixmap,
         )
         painter.end()
+
+    def _load_icon_pixmap(self, icon_path: Path) -> QPixmap | None:
+        try:
+            if icon_path.suffix.lower() == ".svg" and icon_path.exists():
+                renderer = QSvgRenderer(str(icon_path))
+                if renderer.isValid():
+                    target_size = 128
+                    pixmap = QPixmap(target_size, target_size)
+                    pixmap.fill(Qt.transparent)
+                    painter = QPainter(pixmap)
+                    renderer.render(painter, QRectF(0, 0, target_size, target_size))
+                    painter.end()
+                    return pixmap
+        except Exception as exc:  # pragma: no cover - renderer edge cases
+            print(f"[LoadingSpinner] Failed to render SVG: {exc}")
+        pixmap = QPixmap(str(icon_path))
+        return pixmap if not pixmap.isNull() else None
 
 # -------- Main Window --------
 class MainWindow(QMainWindow):
@@ -363,6 +394,8 @@ class MainWindow(QMainWindow):
             max(0, center.y() - size.height() // 2),
         )
         self.loading_spinner.move(top_left)
+        if self.loading_spinner.isVisible():
+            self.loading_spinner.raise_()
 
     def _wrap_release(self, original_release, card: Card):
         def handler(ev):
