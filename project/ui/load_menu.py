@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from PySide6.QtCore import Qt, Slot
+from PySide6.QtCore import Qt, Slot, Signal
 from PySide6.QtGui import QFont, QFontDatabase, QGuiApplication
 from PySide6.QtWidgets import (
     QListWidget,
@@ -28,6 +28,8 @@ class LoadMenu(QWidget):
         / "Almendra"
         / "Almendra-Regular.ttf"
     )
+
+    importRequested = Signal(str)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -108,7 +110,8 @@ class LoadMenu(QWidget):
                 print(f"[LoadMenu] Loaded file ({len(loaded_string)} chars)")
                 self.hide()
         if loaded_string:
-            print("Loaded string for deckloader")
+            print("[LoadMenu] Emitting importRequested signal")
+            self.importRequested.emit(loaded_string)
 
     def _toggle_import_menu(self, show: bool):
         currently_visible = self.import_list.isVisible()

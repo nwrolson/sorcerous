@@ -2,10 +2,11 @@ from __future__ import annotations
 
 from pathlib import Path
 from types import MappingProxyType
-from typing import Dict, Mapping, Optional
+from typing import Callable, Dict, Mapping, Optional
 
 from cache.cache import CacheResult, ImageEntry, ScryfallImageCache
 from card.card import Card
+from loader.loader import DeckLoader, DeckLoaderError
 
 
 class CardSpawner:
@@ -21,6 +22,8 @@ class CardSpawner:
         default_width: float = 120.0,
         default_height: float = 80.0,
         default_back_image_path: Optional[str] = None,
+        deck_loader: Optional[DeckLoader] = None,
+        on_cards_spawned: Optional[Callable[[list[Card]], None]] = None,
     ) -> None:
         self._cache = cache
         self._default_width = default_width
@@ -33,6 +36,8 @@ class CardSpawner:
             )
         self._default_back_image_path = default_back_image_path
         self._spawned: Dict[str, CacheResult] = {}
+        self._deck_loader = deck_loader or DeckLoader()
+        self._cards_callback = on_cards_spawned
 
     @property
     def spawned(self) -> Mapping[str, CacheResult]:
@@ -86,6 +91,40 @@ class CardSpawner:
         # Keep track of every successful spawn for the remainder of the session.
         self._spawned[result.id] = result
         return card
+
+    def spawn_from_deck_input(self, deck_input: str) -> list[Card]:
+        """
+        Use DeckLoader to interpret arbitrary deck text/URLs and spawn cards.
+        Returns the successfully created Card instances.
+        """
+        normalized = (deck_input or "").strip()
+        if not normalized:
+            print("[CardSpawner] Ignoring empty deck input")
+            return []
+        try:
+            entries = self._deck_loader.load(normalized)
+        except DeckLoaderError as exc:
+            print(f"[CardSpawner] Deck load failed: {exc}")
+            return []
+
+        spawned_cards: list[Card] = []
+        for entry in entries:
+            for _ in range(entry.quantity):
+                try:
+                    card = self.spawn_card(entry.set_code, entry.collector_number)
+                except RuntimeError as exc:
+                    print(f"[CardSpawner] Failed to spawn {entry.set_code}/{entry.collector_number}: {exc}")
+                    continue
+                spawned_cards.append(card)
+        return spawned_cards
+
+    def handle_import_signal(self, payload: str) -> None:
+        """
+        Slot-friendly wrapper that loads + spawns cards, then notifies a callback.
+        """
+        cards = self.spawn_from_deck_input(payload)
+        if cards and self._cards_callback:
+            self._cards_callback(cards)
 
     @staticmethod
     def _pick_image(

@@ -125,7 +125,7 @@ class DeckLoader:
         )
 
         if looks_like_url:
-            return self._load_from_url(normalized)
+            return self.load_from_url(normalized)
         return self.load_from_text(normalized)
 
     def load_from_text(self, deck_text: str) -> List[CardPrint]:

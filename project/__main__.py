@@ -74,7 +74,11 @@ class MainWindow(QMainWindow):
             memory_items=512,
             user_agent="VirtualCardPlayer/1.0",
         )
-        self.spawner = CardSpawner(self.card_cache)
+        self.spawner = CardSpawner(
+            self.card_cache,
+            on_cards_spawned=self._handle_spawned_cards,
+        )
+        self.load_menu.importRequested.connect(self.spawner.handle_import_signal)
 
         # cols = 4
         # spacing = QPointF(150, 120)
@@ -243,6 +247,24 @@ class MainWindow(QMainWindow):
                 self.scene.drop_released(card)
                 self._on_card_action()
         return handler
+
+    def _handle_spawned_cards(self, cards: list[Card]) -> None:
+        if not cards:
+            return
+        cols = 5
+        spacing = QPointF(150, 210)
+        start = QPointF(40, 40)
+        existing_cards = sum(1 for item in self.scene.items() if isinstance(item, Card))
+        for offset, card in enumerate(cards):
+            idx = existing_cards + offset
+            col = idx % cols
+            row = idx // cols
+            pos = QPointF(
+                start.x() + col * spacing.x(),
+                start.y() + row * spacing.y(),
+            )
+            self.scene.add_card(card, pos)
+        self._on_card_action()
 
     def _on_card_action(self):
         if not self.streaming_enabled:
