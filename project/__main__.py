@@ -18,11 +18,12 @@ from zones.hand import HandZone
 from zones.library import LibraryZone
 from card.card import Card
 from ui.load_menu import LoadMenu
+from cache.cache import ScryfallImageCache
+from spawner.spawner import CardSpawner
 
 from pathlib import Path
 
 BASE_DIR = Path(__file__).resolve().parent
-BACK_IMAGE = BASE_DIR / "resources" / "Magic_card_back.jpg"
 
 
 # -------- Main Window --------
@@ -67,15 +68,27 @@ class MainWindow(QMainWindow):
         self.scene.add_zone(self.hand_zone, QPointF(0, 0))
         self.scene.add_zone(self.library_zone, QPointF(0, 0))
 
-        cols = 4
-        spacing = QPointF(150, 120)
-        start = QPointF(40, 40)
-        for i in range(2):
-            c = Card(f"Card {i+1}", image_path=r'scryfall-cache\\9ED\\100\\front.png', w=745*0.25, h= 1040*0.25, visible=True)
-            c.set_card_back(BACK_IMAGE)
-            pos = start + QPointF((i % cols)*spacing.x(),
-                                   (i // cols)*spacing.y())
-            self.scene.add_card(c, pos)
+        cache_root = BASE_DIR / "scryfall-cache"
+        self.card_cache = ScryfallImageCache(
+            root_dir=str(cache_root),
+            memory_items=512,
+            user_agent="VirtualCardPlayer/1.0",
+        )
+        self.spawner = CardSpawner(self.card_cache)
+
+        # cols = 4
+        # spacing = QPointF(150, 120)
+        # start = QPointF(40, 40)
+        # for i in range(2):
+        #     c = self.spawner.spawn_card(
+        #         "9ed",
+        #         "100",
+        #         width=745 * 0.25,
+        #         height=1040 * 0.25,
+        #     )
+        #     pos = start + QPointF((i % cols)*spacing.x(),
+        #                            (i // cols)*spacing.y())
+        #     self.scene.add_card(c, pos)
 
         # Hook release events
         for item in self.scene.items():

@@ -74,7 +74,8 @@ class ScryfallImageCache:
     """
     Card image cache keyed by {SET}/{collector_number}.
     - Memory LRU cache.
-    - Disk cache at root: {root}/{SET}/{collector_number}/[front|back|faceN].png
+    - Disk cache at root: {root}/{SET}/{collector_number}/[front|back|faceN].png plus data.txt
+      with the raw JSON response for future reuse.
     - Fetches via /cards/:code/:number JSON, then follows image_uris links.
     """
     API_BASE = "https://api.scryfall.com"
@@ -131,9 +132,9 @@ class ScryfallImageCache:
                 f.write(content)
             os.replace(tmp, path)
 
-    def _get_json(self, url: str) -> Tuple[Optional[dict], Optional[str], Optional[str]]:
+    def _get_json(self, url: str) -> Tuple[Optional[dict], Optional[str], Optional[str], Optional[str]]:
         """
-        Returns (json, error_code, detail).
+        Returns (json, raw_text, error_code, detail).
         error_code in {"api_unreachable", "api_error"} or None.
         """
         try:
@@ -146,10 +147,10 @@ class ScryfallImageCache:
                 r = self._http.get(url, timeout=self.SESSION_TIMEOUT)
 
             if r.status_code != 200:
-                return None, "api_error", f"HTTP {r.status_code}: {r.text[:200]}"
-            return r.json(), None, None
+                return None, None, "api_error", f"HTTP {r.status_code}: {r.text[:200]}"
+            return r.json(), r.text, None, None
         except requests.RequestException as e:
-            return None, "api_unreachable", str(e)
+            return None, None, "api_unreachable", str(e)
 
     def _download_png(self, url: str) -> Tuple[Optional[bytes], Optional[str]]:
         """
@@ -192,7 +193,7 @@ class ScryfallImageCache:
 
         # 3) API JSON (cards/:code/:number)
         url = f"{self.API_BASE}/cards/{set_code.lower()}/{collector_number}"
-        card, err, detail = self._get_json(url)
+        card, card_json_text, err, detail = self._get_json(url)
         if err:
             return CacheResult(ok=False, id=cid, images=[], from_cache=False, error=err, detail=detail)
 
@@ -225,6 +226,9 @@ class ScryfallImageCache:
 
         # 4) Download and store
         base, _ = self._disk_paths(set_code, collector_number)
+        if card_json_text is not None:
+            data_path = os.path.join(base, "data.txt")
+            self._write_file(data_path, card_json_text.encode("utf-8"))
         results: List[ImageEntry] = []
         for face, uri in pngs:
             data, dl_err = self._download_png(uri)
