@@ -213,9 +213,13 @@ class MainWindow(QMainWindow):
         self.load_menu.adjustSize()
         size = self.load_menu.size()
         center = self.rect().center()
+        if hasattr(self.load_menu, "primary_center_offset"):
+            y_offset = self.load_menu.primary_center_offset()
+        else:
+            y_offset = size.height() / 2
         top_left = QPoint(
             max(0, center.x() - size.width() // 2),
-            max(0, center.y() - size.height() // 2),
+            max(0, center.y() - int(y_offset)),
         )
         self.load_menu.move(top_left)
 
