@@ -4,11 +4,23 @@ import sys
 import time
 
 from PySide6.QtCore import (
-    Qt, QPointF, QTimer, QRectF, QPoint
+    Qt,
+    QPointF,
+    QTimer,
+    QRectF,
+    QPoint,
+    QEasingCurve,
+    QPropertyAnimation,
+    Slot,
 )
-from PySide6.QtGui import QImage, QUndoStack, QPainter
+from PySide6.QtGui import QImage, QUndoStack, QPainter, QPixmap
 from PySide6.QtWidgets import (
-    QApplication, QMainWindow, QFrame, QGraphicsView
+    QApplication,
+    QMainWindow,
+    QFrame,
+    QGraphicsOpacityEffect,
+    QGraphicsView,
+    QWidget,
 )
 
 from scene.board import BoardScene, BoardView
@@ -25,6 +37,95 @@ from pathlib import Path
 
 BASE_DIR = Path(__file__).resolve().parent
 
+
+class LoadingSpinner(QWidget):
+    """Simple brass-eye spinner that rotates until dismissed."""
+
+    def __init__(self, icon_path: Path, parent: QWidget | None = None):
+        super().__init__(parent)
+        self.setAttribute(Qt.WA_TransparentForMouseEvents)
+        self.setAttribute(Qt.WA_TranslucentBackground)
+        self.setAttribute(Qt.WA_NoSystemBackground)
+
+        pixmap = QPixmap(str(icon_path))
+        if pixmap.isNull():
+            size = 96
+            pixmap = QPixmap(size, size)
+            pixmap.fill(Qt.transparent)
+            painter = QPainter(pixmap)
+            painter.setPen(Qt.white)
+            painter.drawEllipse(4, 4, size - 8, size - 8)
+            painter.end()
+        self._pixmap = pixmap.scaled(
+            96,
+            96,
+            Qt.KeepAspectRatio,
+            Qt.SmoothTransformation,
+        )
+        self.setFixedSize(self._pixmap.size())
+
+        self._angle = 0.0
+        self._timer = QTimer(self)
+        self._timer.setInterval(16)
+        self._timer.timeout.connect(self._tick)
+
+        self._effect = QGraphicsOpacityEffect(self)
+        self.setGraphicsEffect(self._effect)
+        self._effect.setOpacity(0.0)
+
+        self._fade = QPropertyAnimation(self._effect, b"opacity", self)
+        self._fade.setDuration(500)
+        self._fade.setEasingCurve(QEasingCurve.InOutQuad)
+        self._fade.finished.connect(self._on_fade_finished)
+
+        self.hide()
+
+    def start(self):
+        self._fade.stop()
+        self._effect.setOpacity(1.0)
+        self._angle = 0.0
+        self._timer.start()
+        self.show()
+        self.raise_()
+        self.update()
+
+    def finish(self, immediate: bool = False):
+        if not self.isVisible():
+            return
+        if immediate:
+            self._timer.stop()
+            self.hide()
+            self._effect.setOpacity(0.0)
+            return
+        self._fade.stop()
+        self._fade.setStartValue(self._effect.opacity())
+        self._fade.setEndValue(0.0)
+        self._fade.start()
+
+    def _tick(self):
+        self._angle = (self._angle + 3.0) % 360.0
+        self.update()
+
+    def _on_fade_finished(self):
+        if self._effect.opacity() <= 0.0:
+            self._timer.stop()
+            self.hide()
+
+    def paintEvent(self, event):
+        if self._pixmap.isNull():
+            return
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing, True)
+        painter.translate(self.width() / 2, self.height() / 2)
+        painter.rotate(self._angle)
+        half_w = self._pixmap.width() / 2
+        half_h = self._pixmap.height() / 2
+        painter.drawPixmap(
+            int(-half_w),
+            int(-half_h),
+            self._pixmap,
+        )
+        painter.end()
 
 # -------- Main Window --------
 class MainWindow(QMainWindow):
@@ -48,10 +149,14 @@ class MainWindow(QMainWindow):
 
         self.load_menu = LoadMenu(self)
         self.load_menu.raise_()
+        spinner_icon = BASE_DIR / "resources" / "brass-eye.svg"
+        self.loading_spinner = LoadingSpinner(spinner_icon, self)
+        self.loading_spinner.hide()
 
         # Freeze window size after initial layout
         QTimer.singleShot(0, self._sync_scene_rect_to_viewport)
         QTimer.singleShot(0, self._position_load_menu)
+        QTimer.singleShot(0, self._position_loading_spinner)
 
         # Virtual cam setup
         self.frame_queue: queue.Queue = queue.Queue(maxsize=1)
@@ -76,9 +181,14 @@ class MainWindow(QMainWindow):
         )
         self.spawner = CardSpawner(
             self.card_cache,
+            parent=self,
             on_cards_spawned=self._handle_spawned_cards,
         )
-        self.load_menu.importRequested.connect(self.spawner.handle_import_signal)
+        self.spawner.spawnFailed.connect(self._handle_spawn_failure)
+        self.spawner.spawnCompleted.connect(
+            lambda _: self.loading_spinner.finish()
+        )
+        self.load_menu.importRequested.connect(self._on_import_requested)
 
         # cols = 4
         # spacing = QPointF(150, 120)
@@ -208,6 +318,7 @@ class MainWindow(QMainWindow):
         super().resizeEvent(ev)
         self._sync_scene_rect_to_viewport()
         self._position_load_menu()
+        self._position_loading_spinner()
 
     def _sync_scene_rect_to_viewport(self):
         view_src = self.view.mapToScene(self.view.viewport().rect()).boundingRect()
@@ -240,6 +351,19 @@ class MainWindow(QMainWindow):
         )
         self.load_menu.move(top_left)
 
+    def _position_loading_spinner(self):
+        if not hasattr(self, "loading_spinner") or self.loading_spinner is None:
+            return
+        size = self.loading_spinner.size()
+        if size.isEmpty():
+            return
+        center = self.rect().center()
+        top_left = QPoint(
+            max(0, center.x() - size.width() // 2),
+            max(0, center.y() - size.height() // 2),
+        )
+        self.loading_spinner.move(top_left)
+
     def _wrap_release(self, original_release, card: Card):
         def handler(ev):
             original_release(ev)
@@ -247,6 +371,15 @@ class MainWindow(QMainWindow):
                 self.scene.drop_released(card)
                 self._on_card_action()
         return handler
+
+    @Slot(str)
+    def _on_import_requested(self, payload: str) -> None:
+        accepted = self.spawner.handle_import_signal(payload)
+        if accepted:
+            self._position_loading_spinner()
+            self.loading_spinner.start()
+        else:
+            self.loading_spinner.finish(immediate=True)
 
     def _handle_spawned_cards(self, cards: list[Card]) -> None:
         if not cards:
@@ -265,6 +398,12 @@ class MainWindow(QMainWindow):
             )
             self.scene.add_card(card, pos)
         self._on_card_action()
+
+    def _handle_spawn_failure(self, message: str) -> None:
+        self.loading_spinner.finish(immediate=True)
+        print(f"[MainWindow] Card spawn failed: {message}")
+        if self.load_menu:
+            self.load_menu.show()
 
     def _on_card_action(self):
         if not self.streaming_enabled:

@@ -1,15 +1,22 @@
 from __future__ import annotations
 
+import threading
 from pathlib import Path
 from types import MappingProxyType
 from typing import Callable, Dict, Mapping, Optional
+
+from PySide6.QtCore import QObject, Signal
 
 from cache.cache import CacheResult, ImageEntry, ScryfallImageCache
 from card.card import Card
 from loader.loader import DeckLoader, DeckLoaderError
 
 
-class CardSpawner:
+class CardSpawner(QObject):
+    spawnProgress = Signal(str)
+    spawnFailed = Signal(str)
+    spawnCompleted = Signal(list)
+    jobsReady = Signal(list)
     """
     Helper that fetches card assets and instantiates `Card` objects while
     tracking every spawn within the current session.
@@ -18,6 +25,7 @@ class CardSpawner:
     def __init__(
         self,
         cache: ScryfallImageCache,
+        parent: Optional[QObject] = None,
         *,
         default_width: float = 120.0,
         default_height: float = 80.0,
@@ -25,6 +33,7 @@ class CardSpawner:
         deck_loader: Optional[DeckLoader] = None,
         on_cards_spawned: Optional[Callable[[list[Card]], None]] = None,
     ) -> None:
+        super().__init__(parent)
         self._cache = cache
         self._default_width = default_width
         self._default_height = default_height
@@ -37,12 +46,21 @@ class CardSpawner:
         self._default_back_image_path = default_back_image_path
         self._spawned: Dict[str, CacheResult] = {}
         self._deck_loader = deck_loader or DeckLoader()
-        self._cards_callback = on_cards_spawned
+        self._thread_lock = threading.Lock()
+        self._active_thread: Optional[threading.Thread] = None
+        self.jobsReady.connect(self._on_jobs_ready)
+        if on_cards_spawned:
+            self.spawnCompleted.connect(on_cards_spawned)
 
     @property
     def spawned(self) -> Mapping[str, CacheResult]:
         """Read-only view over the cached spawn metadata."""
         return MappingProxyType(self._spawned)
+
+    def _report_progress(self, message: str) -> None:
+        text = f"[CardSpawner] {message}"
+        print(text)
+        self.spawnProgress.emit(message)
 
     def spawn_card(
         self,
@@ -70,6 +88,15 @@ class CardSpawner:
                 f"{error} ({detail})"
             )
 
+        return self._build_card_from_result(result, width=width, height=height)
+
+    def _build_card_from_result(
+        self,
+        result: CacheResult,
+        *,
+        width: Optional[float] = None,
+        height: Optional[float] = None,
+    ) -> Card:
         front_image = self._pick_image(result.images, preferred_face="front")
         if not front_image:
             raise RuntimeError(
@@ -92,39 +119,126 @@ class CardSpawner:
         self._spawned[result.id] = result
         return card
 
+    def _prepare_spawn_jobs(
+        self,
+        deck_input: str,
+        progress: Optional[Callable[[str], None]] = None,
+    ) -> list[CacheResult]:
+        reporter = progress or self._report_progress
+        normalized = (deck_input or "").strip()
+        if not normalized:
+            reporter("Ignoring empty deck input.")
+            return []
+
+        reporter("Parsing deck input...")
+        entries = self._deck_loader.load(normalized)
+        if not entries:
+            reporter("Deck input produced no entries.")
+            return []
+
+        total_cards = sum(entry.quantity for entry in entries)
+        reporter(f"Preparing {total_cards} card(s) across {len(entries)} entries...")
+
+        prepared_results: list[CacheResult] = []
+        prepared = 0
+        for entry in entries:
+            for _ in range(entry.quantity):
+                result = self._cache.get_images(entry.set_code, entry.collector_number)
+                if not result.ok or not result.images:
+                    detail = result.detail or "no images returned"
+                    error = result.error or "cache_error"
+                    reporter(
+                        f"Skipping {entry.set_code}/{entry.collector_number}: "
+                        f"{error} ({detail})"
+                    )
+                    continue
+                prepared_results.append(result)
+                prepared += 1
+                if total_cards <= 10 or prepared % 5 == 0 or prepared == total_cards:
+                    reporter(f"Fetched assets for {prepared}/{total_cards} cards...")
+
+        reporter("Finished preparing card assets.")
+        return prepared_results
+
+    def _instantiate_cards(
+        self,
+        results: list[CacheResult],
+        *,
+        width: Optional[float] = None,
+        height: Optional[float] = None,
+    ) -> list[Card]:
+        cards: list[Card] = []
+        for result in results:
+            try:
+                card = self._build_card_from_result(
+                    result,
+                    width=width,
+                    height=height,
+                )
+            except RuntimeError as exc:
+                self._report_progress(f"Failed to instantiate card {result.id}: {exc}")
+                continue
+            cards.append(card)
+        return cards
+
     def spawn_from_deck_input(self, deck_input: str) -> list[Card]:
         """
         Use DeckLoader to interpret arbitrary deck text/URLs and spawn cards.
         Returns the successfully created Card instances.
         """
-        normalized = (deck_input or "").strip()
-        if not normalized:
-            print("[CardSpawner] Ignoring empty deck input")
-            return []
         try:
-            entries = self._deck_loader.load(normalized)
+            results = self._prepare_spawn_jobs(deck_input, self._report_progress)
         except DeckLoaderError as exc:
-            print(f"[CardSpawner] Deck load failed: {exc}")
+            self._report_progress(f"Deck load failed: {exc}")
             return []
+        return self._instantiate_cards(results)
 
-        spawned_cards: list[Card] = []
-        for entry in entries:
-            for _ in range(entry.quantity):
-                try:
-                    card = self.spawn_card(entry.set_code, entry.collector_number)
-                except RuntimeError as exc:
-                    print(f"[CardSpawner] Failed to spawn {entry.set_code}/{entry.collector_number}: {exc}")
-                    continue
-                spawned_cards.append(card)
-        return spawned_cards
-
-    def handle_import_signal(self, payload: str) -> None:
+    def handle_import_signal(self, payload: str) -> bool:
         """
         Slot-friendly wrapper that loads + spawns cards, then notifies a callback.
+        Returns True if the request was accepted and work enqueued.
         """
-        cards = self.spawn_from_deck_input(payload)
-        if cards and self._cards_callback:
-            self._cards_callback(cards)
+        with self._thread_lock:
+            if self._active_thread and self._active_thread.is_alive():
+                self._report_progress(
+                    "Spawn already in progress; ignoring additional request."
+                )
+                return False
+            worker = threading.Thread(
+                target=self._run_spawn_job,
+                args=(payload,),
+                daemon=True,
+                name="CardSpawnerWorker",
+            )
+            self._active_thread = worker
+        worker.start()
+        return True
+
+    def _run_spawn_job(self, payload: str) -> None:
+        self._report_progress("Starting background spawn job.")
+        try:
+            results = self._prepare_spawn_jobs(payload, self._report_progress)
+        except DeckLoaderError as exc:
+            self._report_progress(f"Deck load failed: {exc}")
+            self.spawnFailed.emit(str(exc))
+            results = []
+        except Exception as exc:  # pragma: no cover - unexpected
+            self._report_progress(f"Unexpected error while spawning: {exc}")
+            self.spawnFailed.emit(str(exc))
+            results = []
+        else:
+            self._report_progress(
+                f"Prepared {len(results)} card asset bundle(s); dispatching to UI thread."
+            )
+            self.jobsReady.emit(results)
+        finally:
+            with self._thread_lock:
+                self._active_thread = None
+
+    def _on_jobs_ready(self, results: list[CacheResult]) -> None:
+        cards = self._instantiate_cards(results)
+        self._report_progress(f"Instantiated {len(cards)} card(s) on UI thread.")
+        self.spawnCompleted.emit(cards)
 
     @staticmethod
     def _pick_image(
