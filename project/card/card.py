@@ -58,6 +58,7 @@ class Card(QGraphicsObject):
         self.setCacheMode(QGraphicsObject.ItemCoordinateCache)
 
         self._press_pos: QPointF | None = None
+        self._press_item_pos: QPointF | None = None
         self._selection_offsets: list[tuple["Card", QPointF]] = []
         self.setAcceptHoverEvents(True)
         self.setTransformOriginPoint(self.w / 2, self.h / 2)
@@ -66,6 +67,7 @@ class Card(QGraphicsObject):
         self._hover_offset = 0.0
         self._hover_shadow_enabled = False
         self._tapped = False
+        self._dragged_by_user = False
 
         # Scale animation
         self._hover_animation = QVariantAnimation(self)
@@ -191,6 +193,8 @@ class Card(QGraphicsObject):
     def mousePressEvent(self, ev):
         if ev.button() == Qt.LeftButton:
             self._press_pos = ev.scenePos()
+            self._press_item_pos = QPointF(self.pos())
+            self._dragged_by_user = False
             items = [it for it in self.scene().selectedItems() if isinstance(it, Card)]
             if self not in items:
                 self.scene().clearSelection()
@@ -202,17 +206,25 @@ class Card(QGraphicsObject):
 
     def mouseMoveEvent(self, ev):
         if self._press_pos is not None:
-            super().mouseMoveEvent(ev)
+            if self._press_item_pos is None:
+                self._press_item_pos = QPointF(self.pos())
+            delta = ev.scenePos() - self._press_pos
+            self.setPos(self._press_item_pos + delta)
+            if not self._dragged_by_user:
+                self._dragged_by_user = True
+                self._notify_manual_drag()
             for (it, off) in self._selection_offsets:
                 if it is self:
                     continue
                 it.setPos(self.pos() + off)
+            return
         else:
             super().mouseMoveEvent(ev)
 
     def mouseReleaseEvent(self, ev):
         self.setZValue(0)
         self._press_pos = None
+        self._press_item_pos = None
         self._selection_offsets.clear()
         super().mouseReleaseEvent(ev)
 
@@ -285,6 +297,40 @@ class Card(QGraphicsObject):
             return True
         container = scene.model.containers.get(self.card_id, "table")
         return container == "table"
+
+    # ------- Selection Helpers -------
+
+    def reanchor_drag(self, cursor_scene_pos: QPointF):
+        if self._press_pos is None:
+            return
+        self._press_pos = QPointF(cursor_scene_pos)
+        self._press_item_pos = QPointF(self.pos())
+        self._refresh_selection_offsets()
+        self._dragged_by_user = False
+
+    def _refresh_selection_offsets(self):
+        if self._press_pos is None:
+            return
+        scene = self.scene()
+        if scene is None:
+            return
+        items = [it for it in scene.selectedItems() if isinstance(it, Card)]
+        if self not in items:
+            items.insert(0, self)
+        self._selection_offsets = [(it, it.pos() - self.pos()) for it in items]
+
+    def consume_user_drag(self) -> bool:
+        dragged = self._dragged_by_user
+        self._dragged_by_user = False
+        return dragged
+
+    def _notify_manual_drag(self):
+        scene = self.scene()
+        if scene and hasattr(scene, "notify_manual_drag"):
+            scene.notify_manual_drag(self)
+
+    def reset_user_drag_state(self):
+        self._dragged_by_user = False
 
     # ------- Animations -------
 

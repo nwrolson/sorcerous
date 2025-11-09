@@ -1,5 +1,7 @@
+from typing import Callable
+
 from PySide6.QtGui import (
-    QUndoStack
+    QUndoStack, QKeyEvent
 )
 
 from PySide6.QtWidgets import (
@@ -16,12 +18,14 @@ from zones.zone import Zone
 from card.card import Card
 
 class BoardScene(QGraphicsScene):
-    def __init__(self, model: BoardModel, undo: QUndoStack):
+    def __init__(self, model: BoardModel, undo: QUndoStack,
+                 on_manual_drag: Callable[[Card], None] | None = None):
         super().__init__()
         self.model = model
         self.undo = undo
         self.zones: dict[str, Zone] = {}
         self.hover_zone: Zone | None = None
+        self._on_manual_drag = on_manual_drag
 
     def add_zone(self, zone: Zone, scene_pos: QPointF):
         self.addItem(zone)
@@ -37,6 +41,10 @@ class BoardScene(QGraphicsScene):
         self.model.cards[card.card_id]["tapped"] = card.is_tapped()
         self.model.containers[card.card_id] = "table"
         card.moved.connect(lambda pos, c=card: self._on_card_moved(c))
+
+    def notify_manual_drag(self, card: Card):
+        if self._on_manual_drag:
+            self._on_manual_drag(card)
 
     def _on_card_moved(self, card: Card):
         z = self._hover_zone_for(card)
@@ -136,10 +144,12 @@ class BoardView(QGraphicsView):
         self.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self._scale = 1.0
         self.setTransformationAnchor(QGraphicsView.ViewportAnchor.AnchorUnderMouse)
+        self.setFocusPolicy(Qt.StrongFocus)
         self._rubber_band = QRubberBand(QRubberBand.Rectangle, self.viewport())
         self._rubber_band.hide()
         self._selection_origin: QPoint | None = None
         self._drag_selecting = False
+        self._shortcut_handlers: dict[int, tuple[Callable[[QKeyEvent], None], bool]] = {}
 
     def wheelEvent(self, ev):
         if ev.modifiers() & Qt.ControlModifier:
@@ -174,6 +184,21 @@ class BoardView(QGraphicsView):
             self._end_drag_select()
             return
         super().mouseReleaseEvent(ev)
+
+    def keyPressEvent(self, ev):
+        entry = self._shortcut_handlers.get(ev.key())
+        if entry:
+            handler, allow_repeat = entry
+            if not allow_repeat and ev.isAutoRepeat():
+                ev.accept()
+                return
+            handler(ev)
+            ev.accept()
+            return
+        super().keyPressEvent(ev)
+
+    def register_shortcut(self, key: int, handler: Callable[[QKeyEvent], None], *, allow_auto_repeat: bool=False):
+        self._shortcut_handlers[key] = (handler, allow_auto_repeat)
 
     def _begin_drag_select(self, ev):
         self._drag_selecting = True

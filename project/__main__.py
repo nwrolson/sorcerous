@@ -2,9 +2,10 @@ import queue
 import numpy as np
 import sys
 import time
+import statistics
 
 from PySide6.QtCore import Qt, QPointF, QTimer, QRectF, QPoint, Slot
-from PySide6.QtGui import QImage, QUndoStack, QPainter
+from PySide6.QtGui import QImage, QUndoStack, QPainter, QCursor
 from PySide6.QtWidgets import QApplication, QMainWindow, QFrame, QGraphicsView
 
 from scene.board import BoardScene, BoardView
@@ -32,13 +33,17 @@ class MainWindow(QMainWindow):
 
         self.model = BoardModel()
         self.undo = QUndoStack(self)
-        self.scene = BoardScene(self.model, self.undo)
+        self.scene = BoardScene(self.model, self.undo,
+                                on_manual_drag=lambda card: self._on_card_manual_drag(card))
         self.view = BoardView(self.scene)
         self.setCentralWidget(self.view)
         self.view.setFrameShape(QFrame.NoFrame)
         self.view.setViewportMargins(0, 0, 0, 0)
         self.view.setViewportUpdateMode(QGraphicsView.BoundingRectViewportUpdate)
         self.view.setAlignment(Qt.AlignLeft | Qt.AlignTop)
+        self.view.register_shortcut(Qt.Key_T, lambda ev: self._handle_tap_shortcut())
+        self.view.register_shortcut(Qt.Key_Q, lambda ev: self._handle_stack_shortcut(ev))
+        self.view.setFocus()
 
         self.view.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.view.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
@@ -101,6 +106,9 @@ class MainWindow(QMainWindow):
         #     self.scene.add_card(c, pos)
 
         self._register_existing_cards()
+        self._last_stack_cycle_ids: list[str] = []
+        self._stack_selection_key: tuple[str, ...] | None = None
+        self._stack_anchor_point: QPointF | None = None
 
     def _qimage_to_rgb(self, img: QImage) -> np.ndarray:
         # Ensure RGBA8888
@@ -256,10 +264,120 @@ class MainWindow(QMainWindow):
     def _wrap_release(self, original_release, card: Card):
         def handler(ev):
             original_release(ev)
+            dragged = card.consume_user_drag() if hasattr(card, "consume_user_drag") else False
             if ev.button() == Qt.LeftButton:
                 self.scene.drop_released(card)
+                if dragged:
+                    self._clear_stack_anchor()
                 self._on_card_action()
         return handler
+
+    def _handle_tap_shortcut(self):
+        selected_cards = [
+            it for it in self.scene.selectedItems()
+            if isinstance(it, Card)
+        ]
+        table_cards = [
+            card for card in selected_cards
+            if self.scene.model.containers.get(card.card_id, "table") == "table"
+        ]
+        if not table_cards:
+            return
+        tapped_states = [card.is_tapped() for card in table_cards]
+        all_tapped = all(tapped_states)
+        any_tapped = any(tapped_states)
+        if all_tapped or not any_tapped:
+            new_state = not all_tapped
+        else:
+            new_state = True
+        for card in table_cards:
+            card.set_tapped(new_state)
+        self._on_card_action()
+
+    def _handle_stack_shortcut(self, ev=None):
+        selected_cards = [
+            it for it in self.scene.selectedItems()
+            if isinstance(it, Card)
+        ]
+        table_cards = [
+            card for card in selected_cards
+            if self.scene.model.containers.get(card.card_id, "table") == "table"
+        ]
+        if len(table_cards) < 2:
+            return
+
+        ordered_cards = sorted(
+            table_cards,
+            key=lambda c: (round(c.scenePos().y(), 2), round(c.scenePos().x(), 2))
+        )
+        selection_ids = [card.card_id for card in ordered_cards]
+        selection_key = tuple(sorted(selection_ids))
+
+        reuse_anchor = (
+            selection_key == self._stack_selection_key
+            and bool(self._last_stack_cycle_ids)
+            and self._stack_anchor_point is not None
+        )
+
+        if reuse_anchor:
+            rotated = self._last_stack_cycle_ids[1:] + self._last_stack_cycle_ids[:1]
+        else:
+            rotated = selection_ids
+            self._stack_selection_key = selection_key
+            self._stack_anchor_point = self._selection_median_point(ordered_cards)
+        self._last_stack_cycle_ids = rotated[:]
+
+        id_to_card = {card.card_id: card for card in table_cards}
+        ordered_cards = [id_to_card[card_id] for card_id in rotated if card_id in id_to_card]
+        if len(ordered_cards) < 2:
+            return
+
+        first = ordered_cards[0]
+        card_rect = first.boundingRect()
+        anchor_center = self._stack_anchor_point or self._selection_median_point(ordered_cards)
+        anchor = QPointF(
+            anchor_center.x() - card_rect.width() / 2.0,
+            anchor_center.y() - card_rect.height() / 2.0
+        )
+        spread = QPointF(card_rect.width() * 0.2, card_rect.height() * 0.15)
+
+        for idx, card in enumerate(ordered_cards):
+            pos = anchor + QPointF(spread.x() * idx, spread.y() * idx)
+            card.setPos(pos)
+            card.setZValue(5 + idx)
+            self.scene.model.cards[card.card_id]["pos"] = pos
+        self._reanchor_active_drag(self._cursor_scene_pos())
+        self._on_card_action()
+
+    def _cursor_scene_pos(self) -> QPointF | None:
+        cursor_global = QCursor.pos()
+        view_point = self.view.mapFromGlobal(cursor_global)
+        if not self.view.rect().contains(view_point):
+            return None
+        return self.view.mapToScene(view_point)
+
+    def _reanchor_active_drag(self, cursor_scene: QPointF | None):
+        grabber = self.scene.mouseGrabberItem()
+        if isinstance(grabber, Card):
+            grabber.reset_user_drag_state()
+            if cursor_scene is not None:
+                grabber.reanchor_drag(cursor_scene)
+
+    def _on_card_manual_drag(self, card: Card):
+        self._clear_stack_anchor()
+
+    def _clear_stack_anchor(self):
+        self._stack_selection_key = None
+        self._stack_anchor_point = None
+        self._last_stack_cycle_ids.clear()
+
+    def _selection_median_point(self, cards: list[Card]) -> QPointF:
+        xs = sorted(card.scenePos().x() for card in cards)
+        if not xs:
+            return QPointF(0, 0)
+        median_x = float(statistics.median(xs))
+        bottom_y = max(card.scenePos().y() for card in cards)
+        return QPointF(median_x, float(bottom_y))
 
     def _register_existing_cards(self):
         for item in self.scene.items():
