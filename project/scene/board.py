@@ -65,6 +65,7 @@ class BoardScene(QGraphicsScene):
         if zone is not None:
             ordered = self._ordered_cards(cards, zone)
             idx = zone.index_at(card.scenePos())
+            self._preview_zone_snap(zone, ordered, idx)
             cmd = InsertIntoZoneCommand(self.model, self.zones, ordered, zone, idx, table_pos=table_positions)
             self.undo.push(cmd)
             return
@@ -101,6 +102,28 @@ class BoardScene(QGraphicsScene):
         if zone and zone.orientation == "horizontal":
             return sorted(cards, key=lambda c: (c.scenePos().x(), c.scenePos().y()))
         return sorted(cards, key=lambda c: (c.scenePos().y(), c.scenePos().x()))
+
+    def _preview_zone_snap(self, zone: Zone, cards: list[Card], index: int):
+        if not cards:
+            return
+        insert_at = max(0, min(index, len(zone.cards)))
+        original_order = list(zone.cards)
+        try:
+            working_index = insert_at
+            for card in cards:
+                if card in zone.cards:
+                    existing_idx = zone.cards.index(card)
+                    zone.cards.pop(existing_idx)
+                    if existing_idx < working_index:
+                        working_index -= 1
+            insert_at = working_index
+            for offset, card in enumerate(cards):
+                idx = insert_at + offset
+                zone.cards.insert(idx, card)
+                target = zone.pos_for(idx)
+                card.setPos(target)
+        finally:
+            zone.cards[:] = original_order
 
 class BoardView(QGraphicsView):
     def __init__(self, scene: BoardScene):

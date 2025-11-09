@@ -100,16 +100,7 @@ class MainWindow(QMainWindow):
         #                            (i // cols)*spacing.y())
         #     self.scene.add_card(c, pos)
 
-        # Hook release events
-        for item in self.scene.items():
-            if isinstance(item, Card):
-                orig = item.mouseReleaseEvent
-                item.mouseReleaseEvent = self._wrap_release(orig, item)
-
-        # Hook drag move or position changed to capture frame
-        for item in self.scene.items():
-            if isinstance(item, Card):
-                item.moved.connect(lambda pos, c=item: self._on_card_action())
+        self._register_existing_cards()
 
     def _qimage_to_rgb(self, img: QImage) -> np.ndarray:
         # Ensure RGBA8888
@@ -270,6 +261,19 @@ class MainWindow(QMainWindow):
                 self._on_card_action()
         return handler
 
+    def _register_existing_cards(self):
+        for item in self.scene.items():
+            if isinstance(item, Card):
+                self._register_card_item(item)
+
+    def _register_card_item(self, card: Card):
+        if getattr(card, "_sorcerous_card_registered", False):
+            return
+        card._sorcerous_card_registered = True
+        orig = card.mouseReleaseEvent
+        card.mouseReleaseEvent = self._wrap_release(orig, card)
+        card.moved.connect(lambda pos, c=card: self._on_card_action())
+
     @Slot(str, str)
     def _on_import_requested(self, payload: str, target_zone: str) -> None:
         accepted = self.spawner.handle_import_signal(payload, target_zone)
@@ -297,6 +301,7 @@ class MainWindow(QMainWindow):
         for card in cards:
             # Add to scene so zone can take ownership and hide/reflow as needed.
             self.scene.add_card(card, zone.pos())
+            self._register_card_item(card)
             insert_at = len(zone.cards)
             zone.insert_card(insert_at, card)
             self.scene.model.containers[card.card_id] = zone.zone_id
@@ -325,6 +330,7 @@ class MainWindow(QMainWindow):
                 start.y() + row * spacing.y(),
             )
             self.scene.add_card(card, pos)
+            self._register_card_item(card)
 
     def _handle_spawn_failure(self, message: str) -> None:
         self.loading_spinner.finish(immediate=True)
