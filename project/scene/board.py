@@ -26,6 +26,7 @@ class BoardScene(QGraphicsScene):
         self.zones: dict[str, Zone] = {}
         self.hover_zone: Zone | None = None
         self._on_manual_drag = on_manual_drag
+        self.hover_card: Card | None = None
 
     def add_zone(self, zone: Zone, scene_pos: QPointF):
         self.addItem(zone)
@@ -45,6 +46,13 @@ class BoardScene(QGraphicsScene):
     def notify_manual_drag(self, card: Card):
         if self._on_manual_drag:
             self._on_manual_drag(card)
+
+    def notify_hover_enter(self, card: Card):
+        self.hover_card = card
+
+    def notify_hover_leave(self, card: Card):
+        if self.hover_card is card:
+            self.hover_card = None
 
     def _on_card_moved(self, card: Card):
         z = self._hover_zone_for(card)

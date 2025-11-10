@@ -29,6 +29,7 @@ class Card(QGraphicsObject):
                  w: float = 120, h: float = 80,
                  color: QColor = QColor(240, 240, 240),
                  visible: bool = True,
+                 id: int = 0,
                  back_image_path: str | None = None):
         super().__init__()
         self.card_id = card_id
@@ -36,6 +37,7 @@ class Card(QGraphicsObject):
         self.h = h
         self.color = color
         self.visible = visible
+        self.id = id
         self._back_image_path = back_image_path
 
         # Front image
@@ -243,6 +245,9 @@ class Card(QGraphicsObject):
         self.setCacheMode(QGraphicsObject.NoCache)
         self._hover_group.start()
         self.update()
+        scene = self.scene()
+        if scene and hasattr(scene, "notify_hover_enter"):
+            scene.notify_hover_enter(self)
         super().hoverEnterEvent(ev)
 
     def hoverLeaveEvent(self, ev):
@@ -258,6 +263,9 @@ class Card(QGraphicsObject):
         ret.finished.connect(lambda: self.setCacheMode(QGraphicsObject.ItemCoordinateCache))
         ret.start(QPropertyAnimation.DeleteWhenStopped)
         self.update()
+        scene = self.scene()
+        if scene and hasattr(scene, "notify_hover_leave"):
+            scene.notify_hover_leave(self)
         super().hoverLeaveEvent(ev)
 
     def itemChange(self, change, value):

@@ -10,10 +10,12 @@ from PySide6.QtWidgets import QApplication, QMainWindow, QFrame, QGraphicsView
 
 from scene.board import BoardScene, BoardView
 from model.board import BoardModel
+from commands.commands import InsertIntoZoneCommand
 from camera.camera import VirtualCamThread
 from zones.hand import HandZone
 from zones.library import LibraryZone
 from card.card import Card
+from ui.deck_view import ListViewWidget
 from ui.load_menu import LoadMenu
 from ui.loading_spinner import LoadingSpinner
 from cache.cache import ScryfallImageCache
@@ -41,15 +43,21 @@ class MainWindow(QMainWindow):
         self.view.setViewportMargins(0, 0, 0, 0)
         self.view.setViewportUpdateMode(QGraphicsView.BoundingRectViewportUpdate)
         self.view.setAlignment(Qt.AlignLeft | Qt.AlignTop)
-        self.view.register_shortcut(Qt.Key_T, lambda ev: self._handle_tap_shortcut())
-        self.view.register_shortcut(Qt.Key_Q, lambda ev: self._handle_stack_shortcut(ev))
         self.view.setFocus()
 
         self.view.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.view.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
 
+        # Keyboard Shortcuts
+        self.view.register_shortcut(Qt.Key_T, lambda ev: self._handle_tap_shortcut())
+        self.view.register_shortcut(Qt.Key_Q, lambda ev: self._handle_stack_shortcut(ev))
+        self.view.register_shortcut(Qt.Key_D, lambda ev: self._handle_draw_shortcut())
+        self.view.register_shortcut(Qt.Key_L, lambda ev: self._toggle_deck_view())
+
         self.load_menu = LoadMenu(self)
         self.load_menu.raise_()
+        self.deck_view_widget = ListViewWidget(self)
+        self.deck_view_widget.hide()
         spinner_icon = BASE_DIR / "resources" / "brass-eye.svg"
         self.loading_spinner = LoadingSpinner(spinner_icon, self)
         self.loading_spinner.hide()
@@ -58,6 +66,7 @@ class MainWindow(QMainWindow):
         QTimer.singleShot(0, self._sync_scene_rect_to_viewport)
         QTimer.singleShot(0, self._position_load_menu)
         QTimer.singleShot(0, self._position_loading_spinner)
+        QTimer.singleShot(0, self._position_deck_view)
 
         # Virtual cam setup
         self.frame_queue: queue.Queue = queue.Queue(maxsize=1)
@@ -91,20 +100,6 @@ class MainWindow(QMainWindow):
         )
         self.load_menu.importRequested.connect(self._on_import_requested)
 
-        # cols = 4
-        # spacing = QPointF(150, 120)
-        # start = QPointF(40, 40)
-        # for i in range(2):
-        #     c = self.spawner.spawn_card(
-        #         "9ed",
-        #         "100",
-        #         width=745 * 0.25,
-        #         height=1040 * 0.25,
-        #     )
-        #     pos = start + QPointF((i % cols)*spacing.x(),
-        #                            (i // cols)*spacing.y())
-        #     self.scene.add_card(c, pos)
-
         self._register_existing_cards()
         self._last_stack_cycle_ids: list[str] = []
         self._stack_selection_key: tuple[str, ...] | None = None
@@ -119,12 +114,6 @@ class MainWindow(QMainWindow):
         expected = w * h * 4
 
         ptr = img.bits()  # PySide6: memoryview; older PySide: sip.voidptr
-
-        # # Backward compatibility: only call setsize if available
-        # try:
-        #     ptr.setsize(expected)  # older PySide only
-        # except AttributeError:
-        #     pass  # PySide6 memoryview does not need setsize
 
         # Build array without copying, then copy to own buffer
         arr = np.frombuffer(ptr, dtype=np.uint8, count=expected).reshape((h, w, 4))
@@ -162,43 +151,6 @@ class MainWindow(QMainWindow):
             p.end()
         return self._qimage_to_rgb(img)
 
-    # def _render_scene_for_camera(self, out_w: int, out_h: int) -> np.ndarray:
-    #     # 1) Visible area of the view in scene coordinates
-    #     view_src = self.view.mapToScene(self.view.viewport().rect()).boundingRect()
-
-    #     # 2) Render that source rect into an intermediate offscreen image
-    #     #    Make the offscreen size proportional to the visible rect to avoid
-    #     #    fractional scaling during the scene render.
-    #     src_w = max(1, int(round(view_src.width())))
-    #     src_h = max(1, int(round(view_src.height())))
-    #     off = QImage(src_w, src_h, QImage.Format.Format_RGBA8888)
-    #     off.setDevicePixelRatio(1.0)   # deterministic pixel math on all DPRs
-    #     off.fill(Qt.black)
-
-    #     prev = Card.render_target
-    #     Card.render_target = "camera"
-    #     try:
-    #         p = QPainter(off)
-    #         # Render the visible scene rect to a 1:1 target image
-    #         self.scene.render(p, QRectF(0, 0, src_w, src_h), view_src)
-    #         p.end()
-    #     finally:
-    #         Card.render_target = prev
-
-    #     # 3) Scale to the camera output while FILLING the frame
-    #     #    KeepAspectRatioByExpanding ensures no letterboxing, then we crop.
-    #     scaled = off.scaled(out_w, out_h,
-    #                         Qt.AspectRatioMode.KeepAspectRatioByExpanding,
-    #                         Qt.TransformationMode.SmoothTransformation)
-
-    #     # 4) Bottom-align crop to exact camera size
-    #     x = max(0, (scaled.width()  - out_w) // 2)   # center horizontally
-    #     y = max(0, scaled.height() - out_h)          # align bottoms
-    #     final_qimg = scaled.copy(x, y, out_w, out_h)
-
-    #     return self._qimage_to_rgb(final_qimg)
-
-
     def capture_and_queue_frame(self):
         target_w = self.vcam_thread.width
         target_h = self.vcam_thread.height
@@ -214,6 +166,7 @@ class MainWindow(QMainWindow):
         self._sync_scene_rect_to_viewport()
         self._position_load_menu()
         self._position_loading_spinner()
+        self._position_deck_view()
 
     def _sync_scene_rect_to_viewport(self):
         view_src = self.view.mapToScene(self.view.viewport().rect()).boundingRect()
@@ -261,6 +214,29 @@ class MainWindow(QMainWindow):
         if self.loading_spinner.isVisible():
             self.loading_spinner.raise_()
 
+    def _position_deck_view(self):
+        if not hasattr(self, "deck_view_widget") or self.deck_view_widget is None:
+            return
+        size = self.deck_view_widget.size()
+        margin = 24
+        top_left = QPoint(
+            max(0, self.width() - size.width() - margin),
+            margin,
+        )
+        self.deck_view_widget.move(top_left)
+        if self.deck_view_widget.isVisible():
+            self.deck_view_widget.raise_()
+
+    def _toggle_deck_view(self):
+        if not hasattr(self, "deck_view_widget") or self.deck_view_widget is None:
+            return
+        if self.deck_view_widget.isVisible():
+            self.deck_view_widget.hide()
+            return
+        self._position_deck_view()
+        self.deck_view_widget.show()
+        self.deck_view_widget.raise_()
+
     def _wrap_release(self, original_release, card: Card):
         def handler(ev):
             original_release(ev)
@@ -277,6 +253,9 @@ class MainWindow(QMainWindow):
             it for it in self.scene.selectedItems()
             if isinstance(it, Card)
         ]
+        hover_card = getattr(self.scene, "hover_card", None)
+        if hover_card and hover_card not in selected_cards:
+            selected_cards.append(hover_card)
         table_cards = [
             card for card in selected_cards
             if self.scene.model.containers.get(card.card_id, "table") == "table"
@@ -347,6 +326,27 @@ class MainWindow(QMainWindow):
             card.setZValue(5 + idx)
             self.scene.model.cards[card.card_id]["pos"] = pos
         self._reanchor_active_drag(self._cursor_scene_pos())
+        self._on_card_action()
+
+    def _handle_draw_shortcut(self):
+        library = getattr(self, "library_zone", None)
+        hand = getattr(self, "hand_zone", None)
+        if library is None or hand is None:
+            return
+        if not library.cards:
+            return
+        card = library.cards[-1]
+        insert_at = len(hand.cards)
+        table_positions = {card.card_id: QPointF(card.pos())}
+        cmd = InsertIntoZoneCommand(
+            self.model,
+            self.scene.zones,
+            [card],
+            hand,
+            insert_at,
+            table_pos=table_positions,
+        )
+        self.undo.push(cmd)
         self._on_card_action()
 
     def _cursor_scene_pos(self) -> QPointF | None:
