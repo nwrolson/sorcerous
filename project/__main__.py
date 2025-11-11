@@ -259,6 +259,7 @@ class MainWindow(QMainWindow):
                 {
                     "card_id": getattr(card, "id", -1),
                     "name": display_name,
+                    "thumbnail": getattr(card, "thumbnail", None),
                 }
             )
         return entries

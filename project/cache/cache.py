@@ -10,6 +10,8 @@ from collections import OrderedDict
 import json
 
 import requests
+from PySide6.QtCore import QBuffer, QByteArray, QIODevice
+from PySide6.QtGui import QImage
 
 
 @dataclass(frozen=True)
@@ -168,13 +170,12 @@ class ScryfallImageCache:
         except requests.RequestException as e:
             return None, None, "api_unreachable", str(e)
 
-    def _download_png(self, url: str) -> Tuple[Optional[bytes], Optional[str]]:
+    def _download_image(self, url: str, *, require_png_signature: bool = False) -> Tuple[Optional[bytes], Optional[str]]:
         """
-        Returns (bytes, error_code) where error_code in {"api_unreachable", "unusable_image"}.
-        Follows redirects handled by requests.
+        Download arbitrary binary image data. Optionally enforce PNG signature.
+        Returns (bytes, error_code) with error_code in {"api_unreachable", "unusable_image"}.
         """
         try:
-            # For image fetches, Accept anything
             headers = {"Accept": "*/*"}
             self.rate.wait()
             r = self._http.get(url, headers=headers, timeout=self.SESSION_TIMEOUT, stream=True)
@@ -186,12 +187,50 @@ class ScryfallImageCache:
             if r.status_code != 200:
                 return None, "unusable_image"
             data = r.content
-            # Minimal validation
-            if not data.startswith(b"\x89PNG\r\n\x1a\n"):
+            if require_png_signature and not data.startswith(b"\x89PNG\r\n\x1a\n"):
                 return None, "unusable_image"
             return data, None
         except requests.RequestException:
             return None, "api_unreachable"
+
+    def _download_png(self, url: str) -> Tuple[Optional[bytes], Optional[str]]:
+        """Retained for clarity where PNG validation is required."""
+        return self._download_image(url, require_png_signature=True)
+
+    @staticmethod
+    def _guess_image_format(data: bytes) -> str:
+        if data.startswith(b"\x89PNG\r\n\x1a\n"):
+            return "PNG"
+        return "JPG"
+
+    def _crop_thumbnail_top_half(self, data: bytes) -> Optional[bytes]:
+        """
+        Use QImage to crop the upper 50% of the supplied image bytes.
+        Returns the cropped bytes encoded in the original format, or None on failure.
+        """
+        image = QImage.fromData(data)
+        if image.isNull():
+            return None
+        height = image.height()
+        width = image.width()
+        if height <= 0 or width <= 0:
+            return None
+        cropped_height = max(1, height // 2)
+        cropped = image.copy(0, 0, width, cropped_height)
+        if cropped.isNull():
+            return None
+
+        fmt = self._guess_image_format(data)
+        byte_array = QByteArray()
+        buffer = QBuffer(byte_array)
+        if not buffer.open(QIODevice.WriteOnly):
+            return None
+        try:
+            if not cropped.save(buffer, fmt):
+                return None
+            return bytes(byte_array.data())
+        finally:
+            buffer.close()
 
     def _extract_thumbnail_uri(self, card: Optional[dict]) -> Optional[str]:
         if not card:
@@ -203,13 +242,13 @@ class ScryfallImageCache:
                     continue
                 image_uris = face.get("image_uris")
                 if isinstance(image_uris, dict):
-                    uri = image_uris.get("thumbnail")
+                    uri = image_uris.get("art_crop")
                     if uri:
                         return uri
             return None
         image_uris = card.get("image_uris")
         if isinstance(image_uris, dict):
-            return image_uris.get("thumbnail")
+            return image_uris.get("art_crop")
         return None
 
     def _maybe_cache_thumbnail(self, base: str, card_data: Optional[dict]) -> Optional[str]:
@@ -221,9 +260,12 @@ class ScryfallImageCache:
         uri = self._extract_thumbnail_uri(card_data)
         if not uri:
             return None
-        data, dl_err = self._download_png(uri)
-        if dl_err:
+        data, dl_err = self._download_image(uri, require_png_signature=False)
+        if dl_err or data is None:
             return None
+        cropped = self._crop_thumbnail_top_half(data)
+        if cropped:
+            data = cropped
         self._write_file(thumb_path, data)
         return thumb_path
 
