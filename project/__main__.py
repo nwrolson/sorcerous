@@ -56,11 +56,15 @@ class MainWindow(QMainWindow):
 
         self.load_menu = LoadMenu(self)
         self.load_menu.raise_()
-        self.deck_view_widget = ListViewWidget(self)
+        self.deck_view_widget = ListViewWidget(parent=self)
+        self.deck_view_widget.closeRequested.connect(self._hide_deck_view)
+        self.deck_view_widget.dragMoved.connect(self._on_deck_view_moved)
+        self._deck_view_user_pos: QPoint | None = None
         self.deck_view_widget.hide()
         spinner_icon = BASE_DIR / "resources" / "brass-eye.svg"
         self.loading_spinner = LoadingSpinner(spinner_icon, self)
         self.loading_spinner.hide()
+        self.undo.indexChanged.connect(self._refresh_deck_view)
 
         # Freeze window size after initial layout
         QTimer.singleShot(0, self._sync_scene_rect_to_viewport)
@@ -101,6 +105,7 @@ class MainWindow(QMainWindow):
         self.load_menu.importRequested.connect(self._on_import_requested)
 
         self._register_existing_cards()
+        self._refresh_deck_view()
         self._last_stack_cycle_ids: list[str] = []
         self._stack_selection_key: tuple[str, ...] | None = None
         self._stack_anchor_point: QPointF | None = None
@@ -218,24 +223,70 @@ class MainWindow(QMainWindow):
         if not hasattr(self, "deck_view_widget") or self.deck_view_widget is None:
             return
         size = self.deck_view_widget.size()
-        margin = 24
-        top_left = QPoint(
-            max(0, self.width() - size.width() - margin),
-            margin,
-        )
+        if self._deck_view_user_pos is None:
+            center = self.rect().center()
+            top_left = QPoint(
+                max(0, center.x() - size.width() // 2),
+                max(0, center.y() - size.height() // 2),
+            )
+        else:
+            top_left = self._clamp_point_to_window(self._deck_view_user_pos, size)
         self.deck_view_widget.move(top_left)
         if self.deck_view_widget.isVisible():
             self.deck_view_widget.raise_()
+
+    def _clamp_point_to_window(self, pos: QPoint, size) -> QPoint:
+        max_x = max(0, self.width() - size.width())
+        max_y = max(0, self.height() - size.height())
+        clamped_x = max(0, min(pos.x(), max_x))
+        clamped_y = max(0, min(pos.y(), max_y))
+        return QPoint(clamped_x, clamped_y)
+
+    def _refresh_deck_view(self, *_):
+        if not hasattr(self, "deck_view_widget") or self.deck_view_widget is None:
+            return
+        self.deck_view_widget.set_cards(self._library_card_entries())
+
+    def _library_card_entries(self) -> list[dict[str, object]]:
+        library = getattr(self, "library_zone", None)
+        if library is None or not hasattr(library, "cards"):
+            return []
+        entries: list[dict[str, object]] = []
+        for card in library.cards:
+            data = getattr(card, "card_data", None) or {}
+            display_name = data.get("name") or card.card_id
+            entries.append(
+                {
+                    "card_id": getattr(card, "id", -1),
+                    "name": display_name,
+                }
+            )
+        return entries
 
     def _toggle_deck_view(self):
         if not hasattr(self, "deck_view_widget") or self.deck_view_widget is None:
             return
         if self.deck_view_widget.isVisible():
-            self.deck_view_widget.hide()
+            self._hide_deck_view()
             return
         self._position_deck_view()
+        self._refresh_deck_view()
         self.deck_view_widget.show()
         self.deck_view_widget.raise_()
+
+    def _hide_deck_view(self):
+        if not hasattr(self, "deck_view_widget") or self.deck_view_widget is None:
+            return
+        self.deck_view_widget.hide()
+
+    def _on_deck_view_moved(self, pos: QPoint):
+        if not hasattr(self, "deck_view_widget") or self.deck_view_widget is None:
+            return
+        size = self.deck_view_widget.size()
+        clamped = self._clamp_point_to_window(pos, size)
+        if clamped != pos:
+            self.deck_view_widget.move(clamped)
+        self._deck_view_user_pos = clamped
 
     def _wrap_release(self, original_release, card: Card):
         def handler(ev):
@@ -428,6 +479,8 @@ class MainWindow(QMainWindow):
         self.scene.model.zones[zone.zone_id]["order"] = zone_order
         for card in zone.cards:
             self.scene.model.cards[card.card_id]["pos"] = card.pos()
+        if zone.zone_id == "library":
+            self._refresh_deck_view()
         return True
 
     def _layout_cards_on_table(self, cards: list[Card]) -> None:

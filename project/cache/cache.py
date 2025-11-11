@@ -7,6 +7,7 @@ import threading
 from dataclasses import dataclass
 from typing import List, Optional, Tuple, Dict
 from collections import OrderedDict
+import json
 
 import requests
 
@@ -25,6 +26,7 @@ class CacheResult:
     from_cache: bool          # True if satisfied from memory or disk
     error: Optional[str] = None  # "api_unreachable", "unusable_image", etc.
     detail: Optional[str] = None  # human-readable technical detail
+    data: Optional[dict] = None   # Raw card JSON payload when available
 
 
 class _LRU:
@@ -116,6 +118,9 @@ class ScryfallImageCache:
             candidates[f"face{i}"] = os.path.join(base, f"face{i}.png")
         return base, candidates
 
+    def _thumbnail_path(self, base: str) -> str:
+        return os.path.join(base, "thumbnail.png")
+
     def _read_disk(self, set_code: str, collector_number: str) -> List[ImageEntry]:
         base, candidates = self._disk_paths(set_code, collector_number)
         entries: List[ImageEntry] = []
@@ -131,6 +136,17 @@ class ScryfallImageCache:
             with open(tmp, "wb") as f:
                 f.write(content)
             os.replace(tmp, path)
+
+    def _read_card_data(self, base: str) -> Optional[dict]:
+        """Load cached JSON metadata stored alongside card art, if any."""
+        data_path = os.path.join(base, "data.txt")
+        if not os.path.exists(data_path):
+            return None
+        try:
+            with open(data_path, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except (OSError, json.JSONDecodeError):
+            return None
 
     def _get_json(self, url: str) -> Tuple[Optional[dict], Optional[str], Optional[str], Optional[str]]:
         """
@@ -177,19 +193,69 @@ class ScryfallImageCache:
         except requests.RequestException:
             return None, "api_unreachable"
 
+    def _extract_thumbnail_uri(self, card: Optional[dict]) -> Optional[str]:
+        if not card:
+            return None
+        faces = card.get("card_faces")
+        if isinstance(faces, list):
+            for face in faces:
+                if not isinstance(face, dict):
+                    continue
+                image_uris = face.get("image_uris")
+                if isinstance(image_uris, dict):
+                    uri = image_uris.get("thumbnail")
+                    if uri:
+                        return uri
+            return None
+        image_uris = card.get("image_uris")
+        if isinstance(image_uris, dict):
+            return image_uris.get("thumbnail")
+        return None
+
+    def _maybe_cache_thumbnail(self, base: str, card_data: Optional[dict]) -> Optional[str]:
+        thumb_path = self._thumbnail_path(base)
+        if os.path.exists(thumb_path):
+            return thumb_path
+        if not card_data:
+            return None
+        uri = self._extract_thumbnail_uri(card_data)
+        if not uri:
+            return None
+        data, dl_err = self._download_png(uri)
+        if dl_err:
+            return None
+        self._write_file(thumb_path, data)
+        return thumb_path
+
+    @staticmethod
+    def _split_cache_id(cache_id: str) -> Tuple[str, str]:
+        if "/" not in cache_id:
+            raise ValueError(f"invalid cache id '{cache_id}'")
+        set_code, collector_number = cache_id.split("/", 1)
+        return set_code, collector_number
+
     def get_images(self, set_code: str, collector_number: str) -> CacheResult:
         cid = self._key(set_code, collector_number)
+        base, _ = self._disk_paths(set_code, collector_number)
 
         # 1) Memory
         mem_hit = self.mem.get(cid)
         if mem_hit:
-            return CacheResult(ok=True, id=cid, images=mem_hit, from_cache=True)
+            card_data = self._read_card_data(base)
+            self._maybe_cache_thumbnail(base, card_data)
+            return CacheResult(
+                ok=True, id=cid, images=mem_hit, from_cache=True, data=card_data
+            )
 
         # 2) Disk
         disk_entries = self._read_disk(set_code, collector_number)
         if disk_entries:
             self.mem.put(cid, disk_entries)
-            return CacheResult(ok=True, id=cid, images=disk_entries, from_cache=True)
+            card_data = self._read_card_data(base)
+            self._maybe_cache_thumbnail(base, card_data)
+            return CacheResult(
+                ok=True, id=cid, images=disk_entries, from_cache=True, data=card_data
+            )
 
         # 3) API JSON (cards/:code/:number)
         url = f"{self.API_BASE}/cards/{set_code.lower()}/{collector_number}"
@@ -225,7 +291,6 @@ class ScryfallImageCache:
                                error="unusable_image", detail=f"image discovery failed: {e}")
 
         # 4) Download and store
-        base, _ = self._disk_paths(set_code, collector_number)
         if card_json_text is not None:
             data_path = os.path.join(base, "data.txt")
             self._write_file(data_path, card_json_text.encode("utf-8"))
@@ -239,6 +304,27 @@ class ScryfallImageCache:
             self._write_file(path, data)
             results.append(ImageEntry(face=face, path=path))
 
+        # Thumbnail is optional and should not fail the entire request
+        self._maybe_cache_thumbnail(base, card)
+
         # 5) Update memory
         self.mem.put(cid, results)
-        return CacheResult(ok=True, id=cid, images=results, from_cache=False)
+        return CacheResult(ok=True, id=cid, images=results, from_cache=False, data=card)
+
+    def fetch_thumbnail(self, cache_id: str) -> Optional[str]:
+        """
+        Ensure thumbnail.png exists for the given cache id and return its absolute path.
+        cache_id must be of the form "{SET}/{collector_number}".
+        """
+        set_code, collector_number = self._split_cache_id(cache_id)
+        base, _ = self._disk_paths(set_code, collector_number)
+        card_data = self._read_card_data(base)
+        thumb = self._maybe_cache_thumbnail(base, card_data)
+        if thumb:
+            return thumb
+
+        # If we do not have enough metadata, fall back to fetching the images (which also caches JSON).
+        result = self.get_images(set_code, collector_number)
+        if not result.ok:
+            return None
+        return self._maybe_cache_thumbnail(base, result.data or self._read_card_data(base))

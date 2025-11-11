@@ -47,6 +47,9 @@ class CardSpawner(QObject):
         self._spawned: Dict[str, CacheResult] = {}
         self._deck_loader = deck_loader or DeckLoader()
         self._thread_lock = threading.Lock()
+        self._card_id_lock = threading.Lock()
+        self._next_card_id: int = 0
+        self._cards_by_id: dict[int, Card] = {}
         self._active_thread: Optional[threading.Thread] = None
         self.jobsReady.connect(self._on_jobs_ready)
         if on_cards_spawned:
@@ -56,6 +59,12 @@ class CardSpawner(QObject):
     def spawned(self) -> Mapping[str, CacheResult]:
         """Read-only view over the cached spawn metadata."""
         return MappingProxyType(self._spawned)
+
+    @property
+    def cards_by_id(self) -> Mapping[int, Card]:
+        """Read-only snapshot of live Card objects keyed by sequential id."""
+        with self._card_id_lock:
+            return MappingProxyType(dict(self._cards_by_id))
 
     def _report_progress(self, message: str) -> None:
         text = f"[CardSpawner] {message}"
@@ -107,13 +116,19 @@ class CardSpawner(QObject):
         if not back_image:
             back_image = self._default_back_image_path
 
+        card_id = self._allocate_card_id()
+        thumbnail_path = self._cache.fetch_thumbnail(result.id)
         card = Card(
             card_id=result.id,
             image_path=front_image,
             back_image_path=back_image,
+            thumbnail_path=thumbnail_path,
             w=width if width is not None else self._default_width,
             h=height if height is not None else self._default_height,
+            id=card_id,
+            card_data=result.data,
         )
+        self._register_card(card)
 
         # Keep track of every successful spawn for the remainder of the session.
         self._spawned[result.id] = result
@@ -240,6 +255,28 @@ class CardSpawner(QObject):
         self._report_progress(f"Instantiated {len(cards)} card(s) on UI thread.")
         self.spawnCompleted.emit(cards, target_zone)
 
+    def unregister_card(self, card_id: int) -> bool:
+        """
+        Remove the Card reference for `card_id`. Returns True when a card was removed.
+        Intended to be used by destroy_card(id) handlers.
+        """
+        with self._card_id_lock:
+            return self._cards_by_id.pop(card_id, None) is not None
+
+    def get_card(self, card_id: int) -> Optional[Card]:
+        """Return the Card instance for `card_id` or None when the id is unknown."""
+        with self._card_id_lock:
+            return self._cards_by_id.get(card_id)
+
+    def handle_destroy_card(self, card_id: int) -> None:
+        """
+        Slot-friendly wrapper: hook this up to a destroy_card(id) signal to clear
+        the ID-to-card mapping when the UI disposes of a card.
+        """
+        removed = self.unregister_card(card_id)
+        if not removed:
+            self._report_progress(f"destroy_card({card_id}) ignored; id not tracked.")
+
     @staticmethod
     def _pick_image(
         images: list[ImageEntry],
@@ -250,3 +287,15 @@ class CardSpawner(QObject):
             if entry.face == preferred_face:
                 return entry.path
         return images[0].path if images else None
+
+    def _allocate_card_id(self) -> int:
+        """Reserve the next sequential card id in a thread-safe manner."""
+        with self._card_id_lock:
+            card_id = self._next_card_id
+            self._next_card_id += 1
+            return card_id
+
+    def _register_card(self, card: Card) -> None:
+        """Track the newly created Card object by its allocated id."""
+        with self._card_id_lock:
+            self._cards_by_id[card.id] = card

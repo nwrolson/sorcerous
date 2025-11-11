@@ -30,7 +30,9 @@ class Card(QGraphicsObject):
                  color: QColor = QColor(240, 240, 240),
                  visible: bool = True,
                  id: int = 0,
-                 back_image_path: str | None = None):
+                 back_image_path: str | None = None,
+                 thumbnail_path: str | None = None,
+                 card_data: dict | None = None):
         super().__init__()
         self.card_id = card_id
         self.w = w
@@ -38,7 +40,9 @@ class Card(QGraphicsObject):
         self.color = color
         self.visible = visible
         self.id = id
+        self.card_data = card_data
         self._back_image_path = back_image_path
+        self._thumbnail_path = thumbnail_path
 
         # Front image
         self.pixmap: QPixmap | None = None
@@ -50,6 +54,13 @@ class Card(QGraphicsObject):
                     Qt.IgnoreAspectRatio,
                     Qt.SmoothTransformation
                 )
+
+        # Thumbnail image (kept at source size; callers can scale as needed)
+        self._thumbnail: QPixmap | None = None
+        if thumbnail_path:
+            thumb = QPixmap(thumbnail_path)
+            if not thumb.isNull():
+                self._thumbnail = thumb
 
         self.setFlags(
             QGraphicsObject.ItemIsMovable
@@ -120,6 +131,16 @@ class Card(QGraphicsObject):
                                 Qt.SmoothTransformation)
             self._back_cache[key] = pm
         return pm
+
+    @property
+    def thumbnail(self) -> QPixmap | None:
+        """Raw thumbnail pixmap, if supplied."""
+        return self._thumbnail
+
+    @property
+    def thumbnail_path(self) -> str | None:
+        """Source path for the thumbnail on disk."""
+        return self._thumbnail_path
 
     def set_card_back(self, image_path: str | None):
         """Optional: set/replace the back art and clear cache for this size."""
