@@ -20,6 +20,7 @@ class LibraryZone(Zone):
             orientation="vertical",
             hide_cards=True,
             interactive=False,
+            suppress_paint_when_hidden=True,
         )
         self.card_gap = card_gap
 

@@ -15,7 +15,8 @@ from card.card import Card
 class Zone(QGraphicsObject):
     def __init__(self, zone_id: str, width: float=160, slot_h: float=90,
                  padding: float=8, orientation: str="vertical", hide_cards: bool=False,
-                 interactive: bool=True, allow_drops: bool=True):
+                 interactive: bool=True, allow_drops: bool=True,
+                 suppress_paint_when_hidden: bool=False):
         super().__init__()
         self.zone_id = zone_id
         self.width = width
@@ -23,6 +24,7 @@ class Zone(QGraphicsObject):
         self.padding = padding
         self.orientation = orientation
         self.hide_cards = hide_cards
+        self._suppress_paint_when_hidden = suppress_paint_when_hidden
         self._interactive = interactive
         self.allow_drops = allow_drops
         self.cards: list[Card] = []
@@ -117,10 +119,8 @@ class Zone(QGraphicsObject):
         if hasattr(card, "set_tapped"):
             card.set_tapped(False)
         if self.hide_cards:
-            if card.visible:
-                card.visible = False
-                card.update()
-            card.setVisible(False)
+            card.set_face_down(True)
+            card.set_zone_hidden(self._suppress_paint_when_hidden)
         self.reflow_cards()
 
     def remove_card(self, card: Card):
@@ -129,10 +129,9 @@ class Zone(QGraphicsObject):
         self.prepareGeometryChange()
         self.cards.remove(card)
         if self.hide_cards:
-            if not card.visible:
-                card.visible = True
-                card.update()
-            card.setVisible(True)
+            card.set_face_down(False)
+            if self._suppress_paint_when_hidden:
+                card.set_zone_hidden(False)
         self.reflow_cards()
 
     def reflow_cards(self):

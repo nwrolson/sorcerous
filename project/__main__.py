@@ -54,6 +54,8 @@ class MainWindow(QMainWindow):
         self.view.register_shortcut(Qt.Key_Q, lambda ev: self._handle_stack_shortcut(ev))
         self.view.register_shortcut(Qt.Key_D, lambda ev: self._handle_draw_shortcut())
         self.view.register_shortcut(Qt.Key_L, lambda ev: self._toggle_deck_view())
+        self.view.register_shortcut(Qt.Key_X, self._handle_delete_shortcut)
+        self.view.register_shortcut(Qt.Key_Escape, self._handle_escape_shortcut)
 
         self.load_menu = LoadMenu(self)
         self.load_menu.raise_()
@@ -291,6 +293,8 @@ class MainWindow(QMainWindow):
         return entries
 
     def _handle_deck_selection(self, card_numeric_id: int):
+        if not getattr(self, "deck_view_widget", None) or not self.deck_view_widget.isVisible():
+            return
         card = self.spawner.get_card(card_numeric_id)
         if card is None:
             return
@@ -310,7 +314,11 @@ class MainWindow(QMainWindow):
             return
         index = library.cards.index(card)
         library.remove_card(card)
+        # Keep card hidden until preview zone repositions it.
+        card.set_zone_hidden(True)
+        card.set_face_down(False)
         preview.insert_card(0, card)
+        card.set_zone_hidden(False)
         self.scene.model.containers[card.card_id] = preview.zone_id
         self._update_zone_state(library)
         self._update_zone_state(preview)
@@ -373,6 +381,78 @@ class MainWindow(QMainWindow):
         self.deck_view_widget.show()
         self.deck_view_widget.raise_()
         self._position_preview_zone()
+
+    def _handle_escape_shortcut(self, ev=None):
+        load_menu = getattr(self, "load_menu", None)
+        if load_menu is None:
+            return
+        load_menu.show_import_menu()
+        self._position_load_menu()
+
+    def _handle_delete_shortcut(self, ev=None):
+        scene = getattr(self, "scene", None)
+        if scene is None:
+            return
+        selected_cards = [item for item in scene.selectedItems() if isinstance(item, Card)]
+        if not selected_cards:
+            hover_card = getattr(scene, "hover_card", None)
+            if isinstance(hover_card, Card):
+                selected_cards.append(hover_card)
+        if not selected_cards:
+            return
+        self._destroy_cards(selected_cards)
+
+    def _destroy_cards(self, cards: list[Card]):
+        scene = getattr(self, "scene", None)
+        if scene is None or not cards:
+            return
+
+        unique: list[Card] = []
+        seen_ids: set[int] = set()
+        for card in cards:
+            if not isinstance(card, Card):
+                continue
+            key = id(card)
+            if key in seen_ids:
+                continue
+            seen_ids.add(key)
+            unique.append(card)
+        if not unique:
+            return
+
+        preview_card = None
+        if getattr(self, "_preview_state", None):
+            preview_card = self._preview_state.get("card")
+
+        for card in unique:
+            if preview_card is card:
+                self._clear_preview(return_to_library=False)
+                preview_card = None
+
+            container = scene.model.containers.get(card.card_id, "table")
+            zone = scene.zones.get(container) if container != "table" else None
+            if zone and card in zone.cards:
+                zone.remove_card(card)
+                self._update_zone_state(zone)
+
+            if getattr(scene, "hover_card", None) is card:
+                scene.hover_card = None
+
+            card.setSelected(False)
+            active_scene = card.scene()
+            if active_scene is not None:
+                active_scene.removeItem(card)
+            card.deleteLater()
+
+            scene.model.cards.pop(card.card_id, None)
+            scene.model.containers.pop(card.card_id, None)
+
+            numeric_id = getattr(card, "id", None)
+            if isinstance(numeric_id, int):
+                self.spawner.handle_destroy_card(numeric_id)
+
+        self._refresh_deck_view()
+        self._on_card_action()
 
     def _hide_deck_view(self):
         if not hasattr(self, "deck_view_widget") or self.deck_view_widget is None:

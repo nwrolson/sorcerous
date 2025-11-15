@@ -28,7 +28,7 @@ class Card(QGraphicsObject):
     def __init__(self, card_id: str, image_path: str = None,
                  w: float = 120, h: float = 80,
                  color: QColor = QColor(240, 240, 240),
-                 visible: bool = True,
+                 face_down: bool = False,
                  id: int = 0,
                  back_image_path: str | None = None,
                  thumbnail_path: str | None = None,
@@ -38,7 +38,8 @@ class Card(QGraphicsObject):
         self.w = w
         self.h = h
         self.color = color
-        self.visible = visible
+        self.face_down = face_down
+        self._zone_hidden = False
         self.id = id
         self.card_data = card_data
         self._back_image_path = back_image_path
@@ -152,6 +153,19 @@ class Card(QGraphicsObject):
         # trigger redraws when toggling between passes
         self.update()
 
+    def set_zone_hidden(self, hidden: bool):
+        if self._zone_hidden == hidden:
+            return
+        self._zone_hidden = hidden
+        self.setVisible(not hidden)
+        self.update()
+
+    def set_face_down(self, face_down: bool):
+        if self.face_down == face_down:
+            return
+        self.face_down = face_down
+        self.update()
+
     # ------- Painting -------
 
     def boundingRect(self) -> QRectF:
@@ -170,7 +184,10 @@ class Card(QGraphicsObject):
         base = QRectF(0, 0, self.w, self.h)
 
         # Choose face based on pass
-        face_down = (Card.render_target == "camera" and not self.visible)
+        if self._zone_hidden:
+            return
+
+        face_down = (Card.render_target == "camera" and self.face_down)
 
         if self._hover_shadow_enabled:
             painter.save()

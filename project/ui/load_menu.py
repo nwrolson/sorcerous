@@ -204,3 +204,17 @@ class LoadMenu(QWidget):
         except OSError as exc:
             print(f"[LoadMenu] Failed to read file '{path}': {exc}")
             return None
+
+    def show_import_menu(self):
+        """Show the widget and force the Import Cards submenu to be visible."""
+        self.show()
+        self.raise_()
+        import_idx = next(
+            (i for i, option in enumerate(self.PRIMARY_OPTIONS) if option == "Import Cards"),
+            None,
+        )
+        if import_idx is not None:
+            self.main_list.setCurrentRow(import_idx)
+        self._toggle_import_menu(True)
+        if self.import_list.count() > 0:
+            self.import_list.setCurrentRow(0)
