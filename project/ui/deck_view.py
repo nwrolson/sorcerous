@@ -144,6 +144,7 @@ class ListViewWidget(QWidget):
     ):
         super().__init__(parent)
         self.setObjectName("listViewWidget")
+        self.setAttribute(Qt.WA_StyledBackground, True)
         self.setWindowFlag(Qt.FramelessWindowHint, True)
         self._beleren_font = self._load_beleren_font()
         self._mana_renderer = ManaCostRenderer()
@@ -151,12 +152,58 @@ class ListViewWidget(QWidget):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(12, 12, 12, 12)
         layout.setSpacing(8)
+        self.setStyleSheet(
+            """
+            #listViewWidget {
+                background: #121212;
+                border: 2px solid #3f3a2f;
+                border-radius: 12px;
+                color: #f5f5f5;
+            }
+            #listViewWidget QLabel {
+                color: #f5f5f5;
+            }
+            QListWidget {
+                border: none;
+                background: transparent;
+                color: #f5f5f5;
+            }
+            QListWidget::viewport {
+                background: #1b1b1b;
+            }
+            QListWidget::item:selected {
+                background: rgba(255, 255, 255, 0.15);
+            }
+            #deckHeader {
+                background: #1b1b1b;
+                border-radius: 8px;
+            }
+            QLineEdit {
+                border: 2px solid #3f3a2f;
+                border-radius: 6px;
+                padding: 6px;
+                background: #1e1e1e;
+                color: #f5f5f5;
+                selection-background-color: #f5f5f5;
+                selection-color: #121212;
+            }
+            QPushButton {
+                background: transparent;
+                border: 1px solid transparent;
+                color: #f5f5f5;
+            }
+            QPushButton:hover {
+                border-color: #f5f5f5;
+            }
+            """
+        )
 
         self._drag_offset = QPoint()
         self._dragging = False
         self._all_entries: list[Mapping[str, object]] = []
 
         header_bar = QWidget(self)
+        header_bar.setObjectName("deckHeader")
         header_layout = QHBoxLayout(header_bar)
         header_layout.setContentsMargins(0, 0, 0, 0)
         header_layout.setSpacing(8)
@@ -335,7 +382,7 @@ class ListViewWidget(QWidget):
         font = QFont(families[0])
         base_size = self.font().pointSize()
         if base_size <= 0:
-            base_size = 12
+            base_size = 16
         font.setPointSize(base_size + 2)
         return font
 
