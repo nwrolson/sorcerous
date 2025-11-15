@@ -288,9 +288,26 @@ class MainWindow(QMainWindow):
                     "card_id": getattr(card, "id", -1),
                     "name": display_name,
                     "thumbnail": getattr(card, "thumbnail", None),
+                    "mana_costs": self._extract_mana_costs(data),
                 }
             )
         return entries
+
+    def _extract_mana_costs(self, data: dict | None) -> list[str]:
+        """Collect every available mana_cost string for the card, preserving order."""
+        if not isinstance(data, dict):
+            return []
+        costs: list[str] = []
+        primary = (data.get("mana_cost") or "").strip()
+        if primary:
+            costs.append(primary)
+        faces = data.get("card_faces")
+        if isinstance(faces, list):
+            for face in faces:
+                mana = (face.get("mana_cost") or "").strip() if isinstance(face, dict) else ""
+                if mana:
+                    costs.append(mana)
+        return costs
 
     def _handle_deck_selection(self, card_numeric_id: int):
         if not getattr(self, "deck_view_widget", None) or not self.deck_view_widget.isVisible():
