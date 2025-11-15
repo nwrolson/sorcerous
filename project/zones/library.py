@@ -8,7 +8,7 @@ from .zone import Zone
 
 
 class LibraryZone(Zone):
-    """Vertical zone representing the player's library along the right edge."""
+    """Vertical zone representing the player's library; hidden by default but still manages cards."""
 
     def __init__(self, zone_id: str = "library", width: float = 200,
                  slot_h: float = 120, padding: float = 12, card_gap: float = 16):
@@ -19,6 +19,7 @@ class LibraryZone(Zone):
             padding=padding,
             orientation="vertical",
             hide_cards=True,
+            interactive=False,
         )
         self.card_gap = card_gap
 

@@ -14,7 +14,8 @@ from card.card import Card
 
 class Zone(QGraphicsObject):
     def __init__(self, zone_id: str, width: float=160, slot_h: float=90,
-                 padding: float=8, orientation: str="vertical", hide_cards: bool=False):
+                 padding: float=8, orientation: str="vertical", hide_cards: bool=False,
+                 interactive: bool=True, allow_drops: bool=True):
         super().__init__()
         self.zone_id = zone_id
         self.width = width
@@ -22,6 +23,8 @@ class Zone(QGraphicsObject):
         self.padding = padding
         self.orientation = orientation
         self.hide_cards = hide_cards
+        self._interactive = interactive
+        self.allow_drops = allow_drops
         self.cards: list[Card] = []
         self.highlight = False
         self.anchor_left: float | None = None
@@ -40,6 +43,8 @@ class Zone(QGraphicsObject):
         return QRectF(0,0,self.width, total_h)
 
     def paint(self, painter, option, widget=None):
+        if not self._interactive:
+            return
         r = self.boundingRect()
         bg = QColor(250,250,240) if not self.highlight else QColor(255,245,200)
         painter.setBrush(QBrush(bg))
@@ -102,15 +107,20 @@ class Zone(QGraphicsObject):
         self.anchor_bottom = bottom
         self.reflow_cards()
 
+    def is_interactive(self) -> bool:
+        return self._interactive
+
     def insert_card(self, index: int, card: Card):
         self.prepareGeometryChange()
         idx = max(0, min(index, len(self.cards)))
         self.cards.insert(idx, card)
         if hasattr(card, "set_tapped"):
             card.set_tapped(False)
-        if self.hide_cards and card.visible:
-            card.visible = False
-            card.update()
+        if self.hide_cards:
+            if card.visible:
+                card.visible = False
+                card.update()
+            card.setVisible(False)
         self.reflow_cards()
 
     def remove_card(self, card: Card):
@@ -118,9 +128,11 @@ class Zone(QGraphicsObject):
             return
         self.prepareGeometryChange()
         self.cards.remove(card)
-        if self.hide_cards and not card.visible:
-            card.visible = True
-            card.update()
+        if self.hide_cards:
+            if not card.visible:
+                card.visible = True
+                card.update()
+            card.setVisible(True)
         self.reflow_cards()
 
     def reflow_cards(self):

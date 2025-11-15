@@ -14,6 +14,7 @@ from commands.commands import InsertIntoZoneCommand
 from camera.camera import VirtualCamThread
 from zones.hand import HandZone
 from zones.library import LibraryZone
+from zones.preview import PreviewZone
 from card.card import Card
 from ui.deck_view import ListViewWidget
 from ui.load_menu import LoadMenu
@@ -59,6 +60,7 @@ class MainWindow(QMainWindow):
         self.deck_view_widget = ListViewWidget(parent=self)
         self.deck_view_widget.closeRequested.connect(self._hide_deck_view)
         self.deck_view_widget.dragMoved.connect(self._on_deck_view_moved)
+        self.deck_view_widget.cardSelected.connect(self._handle_deck_selection)
         self._deck_view_user_pos: QPoint | None = None
         self.deck_view_widget.hide()
         spinner_icon = BASE_DIR / "resources" / "brass-eye.svg"
@@ -84,8 +86,11 @@ class MainWindow(QMainWindow):
         # Populate items
         self.hand_zone = HandZone("hand")
         self.library_zone = LibraryZone("library")
+        self.preview_zone = PreviewZone("preview", width=260, slot_h=360)
         self.scene.add_zone(self.hand_zone, QPointF(0, 0))
         self.scene.add_zone(self.library_zone, QPointF(0, 0))
+        self.scene.add_zone(self.preview_zone, QPointF(0, 0))
+        self.preview_zone.setVisible(False)
 
         cache_root = BASE_DIR / "scryfall-cache"
         self.card_cache = ScryfallImageCache(
@@ -109,6 +114,7 @@ class MainWindow(QMainWindow):
         self._last_stack_cycle_ids: list[str] = []
         self._stack_selection_key: tuple[str, ...] | None = None
         self._stack_anchor_point: QPointF | None = None
+        self._preview_state: dict | None = None
 
     def _qimage_to_rgb(self, img: QImage) -> np.ndarray:
         # Ensure RGBA8888
@@ -234,6 +240,7 @@ class MainWindow(QMainWindow):
         self.deck_view_widget.move(top_left)
         if self.deck_view_widget.isVisible():
             self.deck_view_widget.raise_()
+        self._position_preview_zone()
 
     def _clamp_point_to_window(self, pos: QPoint, size) -> QPoint:
         max_x = max(0, self.width() - size.width())
@@ -241,11 +248,30 @@ class MainWindow(QMainWindow):
         clamped_x = max(0, min(pos.x(), max_x))
         clamped_y = max(0, min(pos.y(), max_y))
         return QPoint(clamped_x, clamped_y)
+    
+    def _position_preview_zone(self):
+        if not hasattr(self, "preview_zone") or self.preview_zone is None:
+            return
+        if not hasattr(self, "deck_view_widget") or self.deck_view_widget is None:
+            return
+        if not self.deck_view_widget.isVisible():
+            self.preview_zone.setVisible(False)
+            return
+        deck_global = self.deck_view_widget.mapToGlobal(self.deck_view_widget.rect().topLeft())
+        viewport_pos = self.view.viewport().mapFromGlobal(deck_global)
+        scene_pos = self.view.mapToScene(viewport_pos)
+        margin = 16
+        zone_pos = scene_pos + QPointF(self.deck_view_widget.width() + margin, 0)
+        self.preview_zone.setPos(zone_pos)
+        self.preview_zone.setVisible(True)
+        self.preview_zone.set_height(max(self.deck_view_widget.height(), 200))
+        self.preview_zone.reflow_cards()
 
     def _refresh_deck_view(self, *_):
         if not hasattr(self, "deck_view_widget") or self.deck_view_widget is None:
             return
         self.deck_view_widget.set_cards(self._library_card_entries())
+        self._sync_preview_state()
 
     def _library_card_entries(self) -> list[dict[str, object]]:
         library = getattr(self, "library_zone", None)
@@ -264,6 +290,78 @@ class MainWindow(QMainWindow):
             )
         return entries
 
+    def _handle_deck_selection(self, card_numeric_id: int):
+        card = self.spawner.get_card(card_numeric_id)
+        if card is None:
+            return
+        self._show_preview_card(card)
+
+    def _show_preview_card(self, card: Card):
+        if getattr(self, "_preview_state", None):
+            prev_card = self._preview_state.get("card")
+            if prev_card is card:
+                return
+            self._clear_preview(return_to_library=True)
+        library = getattr(self, "library_zone", None)
+        preview = getattr(self, "preview_zone", None)
+        if library is None or preview is None:
+            return
+        if card not in library.cards:
+            return
+        index = library.cards.index(card)
+        library.remove_card(card)
+        preview.insert_card(0, card)
+        self.scene.model.containers[card.card_id] = preview.zone_id
+        self._update_zone_state(library)
+        self._update_zone_state(preview)
+        self._preview_state = {
+            "card": card,
+            "index": index,
+        }
+        self._position_preview_zone()
+
+    def _clear_preview(self, return_to_library: bool):
+        if not getattr(self, "_preview_state", None):
+            return
+        card = self._preview_state.get("card")
+        preview = getattr(self, "preview_zone", None)
+        library = getattr(self, "library_zone", None)
+        in_preview = preview is not None and card in preview.cards
+        if preview and in_preview:
+            preview.remove_card(card)
+            self._update_zone_state(preview)
+        if (
+            return_to_library
+            and in_preview
+            and library is not None
+            and card is not None
+        ):
+            insert_at = min(self._preview_state.get("index", 0), len(library.cards))
+            library.insert_card(insert_at, card)
+            self.scene.model.containers[card.card_id] = library.zone_id
+            self._update_zone_state(library)
+        self._preview_state = None
+
+    def _sync_preview_state(self):
+        if not getattr(self, "_preview_state", None):
+            return
+        card = self._preview_state.get("card")
+        if card is None:
+            self._preview_state = None
+            return
+        container = self.scene.model.containers.get(card.card_id)
+        if container != getattr(self.preview_zone, "zone_id", "preview"):
+            self._preview_state = None
+
+    def _update_zone_state(self, zone):
+        if zone is None:
+            return
+        self.scene.model.zones.setdefault(zone.zone_id, {})
+        self.scene.model.zones[zone.zone_id]["order"] = [c.card_id for c in zone.cards]
+        for card in zone.cards:
+            self.scene.model.cards.setdefault(card.card_id, {})
+            self.scene.model.cards[card.card_id]["pos"] = card.pos()
+
     def _toggle_deck_view(self):
         if not hasattr(self, "deck_view_widget") or self.deck_view_widget is None:
             return
@@ -274,11 +372,15 @@ class MainWindow(QMainWindow):
         self._refresh_deck_view()
         self.deck_view_widget.show()
         self.deck_view_widget.raise_()
+        self._position_preview_zone()
 
     def _hide_deck_view(self):
         if not hasattr(self, "deck_view_widget") or self.deck_view_widget is None:
             return
         self.deck_view_widget.hide()
+        self._clear_preview(return_to_library=True)
+        if hasattr(self, "preview_zone") and self.preview_zone:
+            self.preview_zone.setVisible(False)
 
     def _on_deck_view_moved(self, pos: QPoint):
         if not hasattr(self, "deck_view_widget") or self.deck_view_widget is None:
@@ -288,6 +390,7 @@ class MainWindow(QMainWindow):
         if clamped != pos:
             self.deck_view_widget.move(clamped)
         self._deck_view_user_pos = clamped
+        self._position_preview_zone()
 
     def _wrap_release(self, original_release, card: Card):
         def handler(ev):

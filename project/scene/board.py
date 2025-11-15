@@ -71,7 +71,7 @@ class BoardScene(QGraphicsScene):
         for it in items:
             if it is card:
                 continue
-            if isinstance(it, Zone):
+            if isinstance(it, Zone) and it.is_interactive():
                 return it
         return None
 
@@ -79,7 +79,7 @@ class BoardScene(QGraphicsScene):
         cards = self._selected_cards(card)
         table_positions = {c.card_id: QPointF(c.pos()) for c in cards}
         zone = self._hover_zone_for(card)
-        if zone is not None:
+        if zone is not None and getattr(zone, "allow_drops", True):
             ordered = self._ordered_cards(cards, zone)
             idx = zone.index_at(card.scenePos())
             self._preview_zone_snap(zone, ordered, idx)
