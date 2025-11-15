@@ -93,6 +93,8 @@ class MainWindow(QMainWindow):
         self.scene.add_zone(self.library_zone, QPointF(0, 0))
         self.scene.add_zone(self.preview_zone, QPointF(0, 0))
         self.preview_zone.setVisible(False)
+        self.deck_view_widget.set_preview_sources(self.scene, self.preview_zone)
+        self.deck_view_widget.previewAreaChanged.connect(self._position_preview_zone)
 
         cache_root = BASE_DIR / "scryfall-cache"
         self.card_cache = ScryfallImageCache(
@@ -230,6 +232,7 @@ class MainWindow(QMainWindow):
     def _position_deck_view(self):
         if not hasattr(self, "deck_view_widget") or self.deck_view_widget is None:
             return
+        self.deck_view_widget.resize_for_window(self.size())
         size = self.deck_view_widget.size()
         if self._deck_view_user_pos is None:
             center = self.rect().center()
@@ -244,6 +247,29 @@ class MainWindow(QMainWindow):
             self.deck_view_widget.raise_()
         self._position_preview_zone()
 
+    def _position_preview_zone(self):
+        widget = getattr(self, "deck_view_widget", None)
+        preview = getattr(self, "preview_zone", None)
+        if widget is None or preview is None:
+            return
+        if not widget.isVisible():
+            preview.setVisible(False)
+            widget.sync_preview_zone_view()
+            return
+        rect = widget.preview_area_rect()
+        if rect.isNull():
+            preview.setVisible(False)
+            widget.sync_preview_zone_view()
+            return
+        preview.set_width(rect.width())
+        preview.set_height(rect.height())
+        top_left = self.view.viewport().mapFromGlobal(rect.topLeft())
+        scene_pos = self.view.mapToScene(top_left)
+        preview.setPos(scene_pos)
+        preview.setVisible(True)
+        preview.reflow_cards()
+        widget.sync_preview_zone_view()
+
     def _clamp_point_to_window(self, pos: QPoint, size) -> QPoint:
         max_x = max(0, self.width() - size.width())
         max_y = max(0, self.height() - size.height())
@@ -251,29 +277,13 @@ class MainWindow(QMainWindow):
         clamped_y = max(0, min(pos.y(), max_y))
         return QPoint(clamped_x, clamped_y)
     
-    def _position_preview_zone(self):
-        if not hasattr(self, "preview_zone") or self.preview_zone is None:
-            return
-        if not hasattr(self, "deck_view_widget") or self.deck_view_widget is None:
-            return
-        if not self.deck_view_widget.isVisible():
-            self.preview_zone.setVisible(False)
-            return
-        deck_global = self.deck_view_widget.mapToGlobal(self.deck_view_widget.rect().topLeft())
-        viewport_pos = self.view.viewport().mapFromGlobal(deck_global)
-        scene_pos = self.view.mapToScene(viewport_pos)
-        margin = 16
-        zone_pos = scene_pos + QPointF(self.deck_view_widget.width() + margin, 0)
-        self.preview_zone.setPos(zone_pos)
-        self.preview_zone.setVisible(True)
-        self.preview_zone.set_height(max(self.deck_view_widget.height(), 200))
-        self.preview_zone.reflow_cards()
 
     def _refresh_deck_view(self, *_):
         if not hasattr(self, "deck_view_widget") or self.deck_view_widget is None:
             return
         self.deck_view_widget.set_cards(self._library_card_entries())
         self._sync_preview_state()
+        self._position_preview_zone()
 
     def _library_card_entries(self) -> list[dict[str, object]]:
         library = getattr(self, "library_zone", None)
@@ -331,7 +341,6 @@ class MainWindow(QMainWindow):
             return
         index = library.cards.index(card)
         library.remove_card(card)
-        # Keep card hidden until preview zone repositions it.
         card.set_zone_hidden(True)
         card.set_face_down(False)
         preview.insert_card(0, card)
@@ -339,6 +348,11 @@ class MainWindow(QMainWindow):
         self.scene.model.containers[card.card_id] = preview.zone_id
         self._update_zone_state(library)
         self._update_zone_state(preview)
+        card_data = getattr(card, "card_data", None) or {}
+        name = card_data.get("name") if isinstance(card_data, dict) else None
+        if self.deck_view_widget:
+            self.deck_view_widget.set_preview_title(name or card.card_id)
+            self.deck_view_widget.sync_preview_zone_view()
         self._preview_state = {
             "card": card,
             "index": index,
@@ -351,7 +365,7 @@ class MainWindow(QMainWindow):
         card = self._preview_state.get("card")
         preview = getattr(self, "preview_zone", None)
         library = getattr(self, "library_zone", None)
-        in_preview = preview is not None and card in preview.cards
+        in_preview = preview is not None and card in getattr(preview, "cards", [])
         if preview and in_preview:
             preview.remove_card(card)
             self._update_zone_state(preview)
@@ -366,6 +380,11 @@ class MainWindow(QMainWindow):
             self.scene.model.containers[card.card_id] = library.zone_id
             self._update_zone_state(library)
         self._preview_state = None
+        if self.deck_view_widget:
+            self.deck_view_widget.clear_preview_title()
+            self.deck_view_widget.sync_preview_zone_view()
+        if preview:
+            preview.setVisible(False)
 
     def _sync_preview_state(self):
         if not getattr(self, "_preview_state", None):
@@ -375,8 +394,15 @@ class MainWindow(QMainWindow):
             self._preview_state = None
             return
         container = self.scene.model.containers.get(card.card_id)
-        if container != getattr(self.preview_zone, "zone_id", "preview"):
+        preview_zone = getattr(self, "preview_zone", None)
+        target_zone = getattr(preview_zone, "zone_id", "preview")
+        if container != target_zone:
             self._preview_state = None
+            if self.deck_view_widget:
+                self.deck_view_widget.clear_preview_title()
+                self.deck_view_widget.sync_preview_zone_view()
+            if preview_zone:
+                preview_zone.setVisible(False)
 
     def _update_zone_state(self, zone):
         if zone is None:
@@ -448,9 +474,20 @@ class MainWindow(QMainWindow):
 
             container = scene.model.containers.get(card.card_id, "table")
             zone = scene.zones.get(container) if container != "table" else None
+            removed_from_zone = False
             if zone and card in zone.cards:
                 zone.remove_card(card)
                 self._update_zone_state(zone)
+                removed_from_zone = True
+            if not removed_from_zone:
+                for candidate in scene.zones.values():
+                    if candidate is zone:
+                        continue
+                    if card in candidate.cards:
+                        candidate.remove_card(card)
+                        self._update_zone_state(candidate)
+                        removed_from_zone = True
+                        break
 
             if getattr(scene, "hover_card", None) is card:
                 scene.hover_card = None

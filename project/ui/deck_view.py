@@ -1,6 +1,8 @@
+from __future__ import annotations
+
 from typing import Mapping, Sequence
 
-from PySide6.QtCore import QPoint, QRect, QSize, Qt, QEvent, Signal, QMargins
+from PySide6.QtCore import QPoint, QRect, QSize, Qt, QEvent, Signal
 from PySide6.QtGui import QPalette, QPixmap, QFont, QFontDatabase
 from PySide6.QtWidgets import (
     QApplication,
@@ -12,6 +14,8 @@ from PySide6.QtWidgets import (
     QStyle,
     QStyleOptionViewItem,
     QPushButton,
+    QFrame,
+    QGraphicsView,
     QVBoxLayout,
     QWidget,
     QLineEdit,
@@ -127,15 +131,72 @@ class DeckListDelegate(QStyledItemDelegate):
                 x += delimiter_width + self.MANA_SEPARATOR_SPACING
 
 
+class PreviewGraphicsView(QGraphicsView):
+    """Lightweight view that shows the PreviewZone from the shared scene."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setFrameShape(QFrame.NoFrame)
+        self.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.setFocusPolicy(Qt.NoFocus)
+        self.setAlignment(Qt.AlignCenter)
+        self.setStyleSheet("background: #0b0b0b; border-radius: 8px;")
+        self._zone = None
+        self._hidden_items: list[tuple[object, bool]] = []
+
+    def set_preview_zone(self, zone):
+        self._zone = zone
+        self.refresh_view()
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self.refresh_view()
+
+    def refresh_view(self):
+        if not self.scene() or self._zone is None:
+            return
+        rect = self._zone.sceneBoundingRect()
+        if rect.width() <= 0 or rect.height() <= 0:
+            return
+        self.fitInView(rect, Qt.KeepAspectRatio)
+        self.centerOn(rect.center())
+
+    def paintEvent(self, event):
+        scene = self.scene()
+        if scene is None or self._zone is None:
+            super().paintEvent(event)
+            return
+        allowed_items = {self._zone, *getattr(self._zone, "cards", [])}
+        hidden: list[tuple[object, bool]] = []
+        # Hide any other items whose bounding rect overlaps the preview zone area.
+        zone_rect = self._zone.sceneBoundingRect()
+        for item in scene.items(zone_rect):
+            if item in allowed_items:
+                continue
+            if item.isVisible():
+                hidden.append((item, True))
+                item.setVisible(False)
+        try:
+            super().paintEvent(event)
+        finally:
+            for item, _ in hidden:
+                item.setVisible(True)
+
 class ListViewWidget(QWidget):
     """Deck list overlay that shows the current contents of the library zone."""
 
     _MIN_WIDTH = 240
     _MIN_HEIGHT = 220
+    _PREVIEW_MIN_WIDTH = 260
+    _PREVIEW_RATIO = 0.35
+    _WIDTH_RATIO = 0.5
+    _HEIGHT_RATIO = 0.7
 
     closeRequested = Signal()
     dragMoved = Signal(QPoint)
     cardSelected = Signal(int)
+    previewAreaChanged = Signal()
 
     def __init__(
         self,
@@ -170,6 +231,7 @@ class ListViewWidget(QWidget):
             }
             QListWidget::viewport {
                 background: #1b1b1b;
+                border-radius: 8px;
             }
             QListWidget::item:selected {
                 background: rgba(255, 255, 255, 0.15);
@@ -177,6 +239,11 @@ class ListViewWidget(QWidget):
             #deckHeader {
                 background: #1b1b1b;
                 border-radius: 8px;
+            }
+            #previewFrame {
+                background: #1b1b1b;
+                border: 2px solid #3f3a2f;
+                border-radius: 12px;
             }
             QLineEdit {
                 border: 2px solid #3f3a2f;
@@ -228,6 +295,22 @@ class ListViewWidget(QWidget):
         self.list_widget.setUniformItemSizes(True)
         self.list_widget.setItemDelegate(DeckListDelegate(self.list_widget))
         self.list_widget.currentItemChanged.connect(self._handle_selection_changed)
+        self.list_widget.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self.list_widget.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+
+        self.preview_frame = QFrame(self)
+        self.preview_frame.setObjectName("previewFrame")
+        self.preview_frame.setMinimumWidth(self._PREVIEW_MIN_WIDTH)
+        preview_layout = QVBoxLayout(self.preview_frame)
+        preview_layout.setContentsMargins(12, 12, 12, 12)
+        preview_layout.setSpacing(12)
+        self.preview_title = QLabel("Select a card", self.preview_frame)
+        self.preview_title.setAlignment(Qt.AlignCenter)
+        self.preview_title.setWordWrap(True)
+        self.preview_view = PreviewGraphicsView(self.preview_frame)
+        self.preview_view.setMinimumSize(self._PREVIEW_MIN_WIDTH - 20, 360)
+        preview_layout.addWidget(self.preview_title)
+        preview_layout.addWidget(self.preview_view, 1)
 
         self.search_box = QLineEdit(self)
         self.search_box.setPlaceholderText("Search...")
@@ -235,10 +318,26 @@ class ListViewWidget(QWidget):
 
         self._apply_custom_font()
         layout.addWidget(header_bar)
-        layout.addWidget(self.list_widget)
+        content = QHBoxLayout()
+        content.setContentsMargins(0, 0, 0, 0)
+        content.setSpacing(16)
+        content.addWidget(self.list_widget, 1)
+        content.addWidget(self.preview_frame, 0)
+        layout.addLayout(content, 1)
         layout.addWidget(self.search_box)
 
         self.set_cards(entries or [])
+
+    def resize_for_window(self, window_size: QSize):
+        width = max(self._MIN_WIDTH, int(window_size.width() * self._WIDTH_RATIO))
+        height = max(self._MIN_HEIGHT, int(window_size.height() * self._HEIGHT_RATIO))
+        preview_width = max(self._PREVIEW_MIN_WIDTH, int(width * self._PREVIEW_RATIO))
+        self.preview_frame.setFixedWidth(preview_width)
+        list_width = max(240, width - preview_width - 48)
+        self.list_widget.setMinimumWidth(list_width)
+        self.setFixedSize(width, height)
+        self.sync_preview_zone_view()
+        self.previewAreaChanged.emit()
 
     def set_cards(self, entries: Sequence[Mapping[str, object]]):
         """Replace the list contents with the provided deck entries."""
@@ -289,14 +388,14 @@ class ListViewWidget(QWidget):
             placeholder = QListWidgetItem("No cards found", self.list_widget)
             placeholder.setFlags(placeholder.flags() & ~Qt.ItemIsEnabled)
             self.list_widget.blockSignals(False)
-            self._update_size()
+            self._notify_layout_changed()
             return
         if self.list_widget.currentItem() is None:
             self.list_widget.setCurrentRow(0)
         self.list_widget.blockSignals(False)
         if self.list_widget.currentItem():
             self._handle_selection_changed(self.list_widget.currentItem(), None)
-        self._update_size()
+        self._notify_layout_changed()
 
     def _filtered_entries(self, query: str):
         if not query:
@@ -316,24 +415,9 @@ class ListViewWidget(QWidget):
             Qt.SmoothTransformation,
         )
 
-    def _update_size(self):
-        column_width = self.list_widget.sizeHintForColumn(0)
-        if column_width < 0:
-            column_width = self._MIN_WIDTH
-        row_height = self.list_widget.sizeHintForRow(0)
-        if row_height < 0:
-            row_height = 24
-        thumb_extra = DeckListDelegate.THUMB_SIZE.width() + DeckListDelegate.PADDING * 2
-        search_height = self.search_box.sizeHint().height()
-        layout = self.layout()
-        margins = layout.contentsMargins() if layout else QMargins(0, 0, 0, 0)
-        content_width = max(column_width + 48 + thumb_extra, self._max_entry_width())
-        width = max(self._MIN_WIDTH, int(content_width + margins.left() + margins.right()))
-        height = max(
-            self._MIN_HEIGHT,
-            min(row_height * max(1, self.list_widget.count()) + 96 + search_height, 520),
-        )
-        self.setFixedSize(width, height)
+    def _notify_layout_changed(self):
+        self.sync_preview_zone_view()
+        self.previewAreaChanged.emit()
 
     def _max_entry_width(self) -> float:
         """Estimate the widest row so the widget can expand to avoid clipping."""
@@ -363,6 +447,29 @@ class ListViewWidget(QWidget):
                 max_width = total
         return max_width
 
+    def set_preview_sources(self, scene, preview_zone):
+        if self.preview_view.scene() is not scene:
+            self.preview_view.setScene(scene)
+        self.preview_view.set_preview_zone(preview_zone)
+        self.sync_preview_zone_view()
+
+    def sync_preview_zone_view(self):
+        self.preview_view.refresh_view()
+
+    def preview_area_rect(self) -> QRect:
+        if not hasattr(self, "preview_view"):
+            return QRect()
+        local = self.preview_view.rect()
+        top_left = self.preview_view.mapToGlobal(local.topLeft())
+        bottom_right = self.preview_view.mapToGlobal(local.bottomRight())
+        return QRect(top_left, bottom_right)
+
+    def set_preview_title(self, title: str):
+        self.preview_title.setText(title or "Select a card")
+
+    def clear_preview_title(self):
+        self.preview_title.setText("Select a card")
+
     def _load_beleren_font(self) -> QFont | None:
         font_path = (
             Path(__file__).resolve().parents[1]
@@ -389,8 +496,21 @@ class ListViewWidget(QWidget):
     def _apply_custom_font(self) -> None:
         if not isinstance(self._beleren_font, QFont):
             return
-        for widget in (self, self.header, self.list_widget, self.search_box):
+        for widget in (
+            self,
+            self.header,
+            self.list_widget,
+            self.search_box,
+            getattr(self, "preview_title", None),
+        ):
+            if widget is None:
+                continue
             widget.setFont(self._beleren_font)
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self.sync_preview_zone_view()
+        self.previewAreaChanged.emit()
 
     def eventFilter(self, obj, event):
         if obj is self._header_bar:

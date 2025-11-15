@@ -76,12 +76,20 @@ class DeckLoader:
             r"^\s*(\d+)\s*x?\s*\[\s*(?P<set>[A-Za-z0-9]{2,5})\s*:"
             r"\s*(?P<num>[A-Za-z0-9]+)\s*\]\s+(?P<name>.+?)\s*$"
         ),
-        # 2 Card Name (SET) 123
+        # 2 Card Name (SET) OTHERSET-123
+        #    Handles The List exports where the printed set/number is encoded
+        #    as "<actual-set>-<number>" after the parenthetical set.
+        re.compile(
+            r"^\s*(\d+)\s*x?\s+(?P<name>.+?)\s+"
+            r"\((?:[A-Za-z0-9]{2,5})\)\s+"
+            r"(?P<set>[A-Za-z0-9]{2,5})\s*-\s*(?P<num>[A-Za-z0-9]+)\s*$"
+        ),
+        # 3 Card Name (SET) 123
         re.compile(
             r"^\s*(\d+)\s*x?\s+(?P<name>.+?)\s+"
             r"\((?P<set>[A-Za-z0-9]{2,5})\)\s+(?P<num>[A-Za-z0-9]+)\s*$"
         ),
-        # 3 Fallback: no explicit set/number – we'll resolve via Scryfall
+        # 4 Fallback: no explicit set/number – we'll resolve via Scryfall
         re.compile(r"^\s*(\d+)\s*x?\s+(?P<name>.+?)\s*$"),
     )
 
