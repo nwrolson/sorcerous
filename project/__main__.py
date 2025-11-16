@@ -55,6 +55,11 @@ class MainWindow(QMainWindow):
         self.view.register_shortcut(Qt.Key_Q, lambda ev: self._handle_stack_shortcut(ev))
         self.view.register_shortcut(Qt.Key_D, lambda ev: self._handle_draw_shortcut())
         self.view.register_shortcut(Qt.Key_S, lambda ev: self._handle_shuffle_shortcut())
+        self.view.register_shortcut(
+            Qt.Key_S,
+            lambda ev: self._handle_ctrl_s_shortcut(),
+            modifiers=Qt.ControlModifier,
+        )
         self.view.register_shortcut(Qt.Key_L, lambda ev: self._toggle_deck_view())
         self.view.register_shortcut(Qt.Key_X, self._handle_delete_shortcut)
         self.view.register_shortcut(Qt.Key_Escape, self._handle_escape_shortcut)
@@ -619,26 +624,35 @@ class MainWindow(QMainWindow):
         self._reanchor_active_drag(self._cursor_scene_pos())
         self._on_card_action()
 
-    def _handle_draw_shortcut(self):
+    def _draw_cards(self, count: int):
+        if count <= 0:
+            return
         library = getattr(self, "library_zone", None)
         hand = getattr(self, "hand_zone", None)
         if library is None or hand is None:
             return
-        if not library.cards:
+        available = len(getattr(library, "cards", []))
+        if available <= 0:
             return
-        card = library.cards[-1]
+        draw_count = min(count, available)
+        cards_to_draw = list(reversed(library.cards[-draw_count:]))
+        if not cards_to_draw:
+            return
         insert_at = len(hand.cards)
-        table_positions = {card.card_id: QPointF(card.pos())}
+        table_positions = {card.card_id: QPointF(card.pos()) for card in cards_to_draw}
         cmd = InsertIntoZoneCommand(
             self.model,
             self.scene.zones,
-            [card],
+            cards_to_draw,
             hand,
             insert_at,
             table_pos=table_positions,
         )
         self.undo.push(cmd)
         self._on_card_action()
+
+    def _handle_draw_shortcut(self):
+        self._draw_cards(1)
 
     def _handle_shuffle_shortcut(self):
         library = getattr(self, "library_zone", None)
@@ -650,6 +664,30 @@ class MainWindow(QMainWindow):
         self._update_zone_state(library)
         self._refresh_deck_view()
         self._on_card_action()
+
+    def _handle_ctrl_s_shortcut(self):
+        library = getattr(self, "library_zone", None)
+        hand = getattr(self, "hand_zone", None)
+        if library is None or hand is None:
+            return
+
+        if hand.cards:
+            cards_to_move = list(hand.cards)
+            insert_at = len(library.cards)
+            table_positions = {card.card_id: QPointF(card.pos()) for card in cards_to_move}
+            cmd = InsertIntoZoneCommand(
+                self.model,
+                self.scene.zones,
+                cards_to_move,
+                library,
+                insert_at,
+                table_pos=table_positions,
+            )
+            self.undo.push(cmd)
+            self._on_card_action()
+
+        self._handle_shuffle_shortcut()
+        self._draw_cards(7)
 
     def _cursor_scene_pos(self) -> QPointF | None:
         cursor_global = QCursor.pos()

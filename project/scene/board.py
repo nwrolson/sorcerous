@@ -157,7 +157,7 @@ class BoardView(QGraphicsView):
         self._rubber_band.hide()
         self._selection_origin: QPoint | None = None
         self._drag_selecting = False
-        self._shortcut_handlers: dict[int, tuple[Callable[[QKeyEvent], None], bool]] = {}
+        self._shortcut_handlers: dict[tuple[int, int], tuple[Callable[[QKeyEvent], None], bool]] = {}
 
     def wheelEvent(self, ev):
         if ev.modifiers() & Qt.ControlModifier:
@@ -203,7 +203,7 @@ class BoardView(QGraphicsView):
         super().mouseReleaseEvent(ev)
 
     def keyPressEvent(self, ev):
-        entry = self._shortcut_handlers.get(ev.key())
+        entry = self._shortcut_handlers.get((ev.key(), self._normalize_modifiers(ev.modifiers())))
         if entry:
             handler, allow_repeat = entry
             if not allow_repeat and ev.isAutoRepeat():
@@ -214,8 +214,31 @@ class BoardView(QGraphicsView):
             return
         super().keyPressEvent(ev)
 
-    def register_shortcut(self, key: int, handler: Callable[[QKeyEvent], None], *, allow_auto_repeat: bool=False):
-        self._shortcut_handlers[key] = (handler, allow_auto_repeat)
+    def register_shortcut(
+        self,
+        key: int,
+        handler: Callable[[QKeyEvent], None],
+        *,
+        allow_auto_repeat: bool = False,
+        modifiers: Qt.KeyboardModifiers | Qt.KeyboardModifier = Qt.KeyboardModifier.NoModifier,
+    ):
+        norm = self._normalize_modifiers(modifiers)
+        self._shortcut_handlers[(key, norm)] = (handler, allow_auto_repeat)
+
+    def _normalize_modifiers(
+        self,
+        modifiers: Qt.KeyboardModifiers | Qt.KeyboardModifier | int,
+    ) -> Qt.KeyboardModifiers:
+        flags = Qt.KeyboardModifiers(modifiers)
+
+        relevant = (
+            Qt.KeyboardModifier.ShiftModifier
+            | Qt.KeyboardModifier.ControlModifier
+            | Qt.KeyboardModifier.AltModifier
+            | Qt.KeyboardModifier.MetaModifier
+        )
+
+        return flags & relevant
 
     def _begin_drag_select(self, ev):
         self._drag_selecting = True

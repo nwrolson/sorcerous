@@ -45,6 +45,12 @@ class Card(QGraphicsObject):
         self._back_image_path = back_image_path
         self._thumbnail_path = thumbnail_path
         self._clamp_to_scene = True
+        self._hand_hover_active = False
+        self._hand_hover_cancel_on_leave = False
+        self._skip_default_hover_leave = False
+        self._suppress_default_hover_enter = False
+        self._hover_offset_anim = None
+        self._hand_hover_dragged_out = False
 
         # Front image
         self.pixmap: QPixmap | None = None
@@ -246,6 +252,10 @@ class Card(QGraphicsObject):
             self._press_pos = ev.scenePos()
             self._press_item_pos = QPointF(self.pos())
             self._dragged_by_user = False
+
+            # New: we're starting a new interaction, so reset this
+            self._hand_hover_dragged_out = False
+
             items = [it for it in self.scene().selectedItems() if isinstance(it, Card)]
             if self not in items:
                 self.scene().clearSelection()
@@ -255,28 +265,72 @@ class Card(QGraphicsObject):
             self.setZValue(10)
         super().mousePressEvent(ev)
 
+
     def mouseMoveEvent(self, ev):
         if self._press_pos is not None:
             if self._press_item_pos is None:
                 self._press_item_pos = QPointF(self.pos())
+
             delta = ev.scenePos() - self._press_pos
-            self.setPos(self._press_item_pos + delta)
+
+            # First time we recognize a drag this press
             if not self._dragged_by_user:
                 self._dragged_by_user = True
                 self._notify_manual_drag()
+
+                # If this drag started from the hand, we don't want the
+                # hand hover anymore for this interaction. But we must
+                # kill it without visually snapping the card.
+                if self._should_use_hand_hover() and not self._hand_hover_dragged_out:
+                    self._hand_hover_dragged_out = True
+
+                    # Capture the scene position of the card's top-left BEFORE
+                    # we reset the hover transform.
+                    scene = self.scene()
+                    before_tl = self.mapToScene(QPointF(0, 0)) if scene is not None else None
+
+                    # Reset the hover transform state
+                    if self._hand_hover_active or self._hover_offset != 0.0 or self._hover_scale != 1.0:
+                        self._cancel_hand_hover_for_drag()
+
+                    # After neutralizing transforms, adjust pos() so that the
+                    # same point stays under the cursor / on screen.
+                    if before_tl is not None:
+                        after_tl = self.mapToScene(QPointF(0, 0))
+                        offset_delta = before_tl - after_tl
+                        self.setPos(self.pos() + offset_delta)
+
+                        # Re-anchor the drag origin to the new neutral state
+                        self._press_pos = ev.scenePos()
+                        self._press_item_pos = QPointF(self.pos())
+                        self._refresh_selection_offsets()
+
+            # Standard drag motion using (press_pos, press_item_pos)
+            self.setPos(self._press_item_pos + delta)
+
             for (it, off) in self._selection_offsets:
                 if it is self:
                     continue
                 it.setPos(self.pos() + off)
+
             return
         else:
             super().mouseMoveEvent(ev)
+
+
 
     def mouseReleaseEvent(self, ev):
         self.setZValue(0)
         self._press_pos = None
         self._press_item_pos = None
         self._selection_offsets.clear()
+
+        if self._hand_hover_active and self._dragged_by_user:
+            self._cancel_hand_hover_immediate()
+        else:
+            self._hand_hover_cancel_on_leave = False
+
+        self._dragged_by_user = False
         super().mouseReleaseEvent(ev)
 
     def mouseDoubleClickEvent(self, ev):
@@ -288,33 +342,186 @@ class Card(QGraphicsObject):
         super().mouseDoubleClickEvent(ev)
 
     def hoverEnterEvent(self, ev):
+        # Only use hand hover if:
+        # - the model says this card is a hand card, AND
+        # - we have not already dragged it out of the hand during this interaction
+        if self._should_use_hand_hover() and not self._hand_hover_dragged_out:
+            self._begin_hand_hover()
+        else:
+            if self._suppress_default_hover_enter:
+                self._suppress_default_hover_enter = False
+                return
+            self._skip_default_hover_leave = False
+            self._begin_default_hover()
+
+        scene = self.scene()
+        if scene and hasattr(scene, "notify_hover_enter"):
+            scene.notify_hover_enter(self)
+        super().hoverEnterEvent(ev)
+
+
+    def hoverLeaveEvent(self, ev):
+        if self._hand_hover_active:
+            self._end_hand_hover()
+        else:
+            if self._skip_default_hover_leave:
+                return
+            self._end_default_hover()
+
+        self._hand_hover_cancel_on_leave = False
+        scene = self.scene()
+        if scene and hasattr(scene, "notify_hover_leave"):
+            scene.notify_hover_leave(self)
+        super().hoverLeaveEvent(ev)
+
+
+    def _begin_default_hover(self):
+        self._hand_hover_active = False
         self._start_hover_animation(HOVER_SCALE_FACTOR)
         self._hover_shadow_enabled = True
         # ensure transform changes are visible while animating
         self.setCacheMode(QGraphicsObject.NoCache)
         self._hover_group.start()
         self.update()
-        scene = self.scene()
-        if scene and hasattr(scene, "notify_hover_enter"):
-            scene.notify_hover_enter(self)
-        super().hoverEnterEvent(ev)
 
-    def hoverLeaveEvent(self, ev):
+    def _end_default_hover(self):
         self._start_hover_animation(1.0)
         self._hover_shadow_enabled = False
         self._hover_group.stop()
         # ease back to y=0 in case we stopped mid-cycle
-        ret = QPropertyAnimation(self, b"hoverOffset")
-        ret.setDuration(HOVER_ANIMATION_DURATION_MS)
-        ret.setStartValue(self._hover_offset)
-        ret.setEndValue(0.0)
-        ret.setEasingCurve(QEasingCurve.InOutSine)
-        ret.start(QPropertyAnimation.DeleteWhenStopped)
+        self._animate_hover_offset(self._hover_offset, 0.0)
         self.update()
+
+    def _begin_hand_hover(self):
+        self._hover_animation.stop()
+        self._hover_group.stop()
+        self._hover_scale = 1.0
+        self._hover_shadow_enabled = True
+        self._hand_hover_active = True
+        self.setCacheMode(QGraphicsObject.NoCache)
+        current = self._hover_offset
+        target = self._hand_hover_target_offset()
+        if current != target:
+            self._animate_hover_offset(current, target)
+        else:
+            self.setHoverOffset(target)
+        self.update()
+
+    def _end_hand_hover(self):
+        self._hover_animation.stop()
+        self._hover_group.stop()
+        self._hover_scale = 1.0
+        self._hover_shadow_enabled = False
+        target = self._hover_offset
+        if target != 0.0:
+            self._animate_hover_offset(target, 0.0)
+        else:
+            self.setHoverOffset(0.0)
+        self._hand_hover_active = False
+        self.update()
+
+    def _cancel_hand_hover_for_drag(self):
+        """Stop hand-hover for drag start, but keep visual position continuous.
+
+        Caller is responsible for re-anchoring self.pos() after this so that
+        the card does not visually 'snap' when transforms reset.
+        """
+        # Stop animations
+        self._hover_animation.stop()
+        self._hover_group.stop()
+        if self._hover_offset_anim is not None:
+            try:
+                self._hover_offset_anim.stop()
+            except RuntimeError:
+                pass
+            self._hover_offset_anim.deleteLater()
+            self._hover_offset_anim = None
+
+        # Reset hover transform state to neutral
+        self._hover_scale = 1.0
+        self._hover_shadow_enabled = False
+        # setHoverOffset will rebuild the transform to neutral
+        self.setHoverOffset(0.0)
+
+        # We're no longer in the special hand-hover mode
+        self._hand_hover_active = False
+        # Do NOT touch _skip_default_hover_leave / _suppress_default_hover_enter here
+
+
+    def _cancel_hand_hover_immediate(self):
+        self._hover_animation.stop()
+        self._hover_group.stop()
+        if self._hover_offset_anim is not None:
+            try:
+                self._hover_offset_anim.stop()
+            except RuntimeError:
+                pass
+            self._hover_offset_anim.deleteLater()
+            self._hover_offset_anim = None
+        self._hover_scale = 1.0
+        self._hover_shadow_enabled = False
+        self.setHoverOffset(0.0)
+        self._hand_hover_active = False
+        self._hand_hover_cancel_on_leave = False
+        self._skip_default_hover_leave = True
+        self._suppress_default_hover_enter = True
+        self.update()
+
+    def _cancel_hand_hover_for_rezone(self):
+        """Cancel the hand-hover state when the card leaves the hand zone.
+
+        This fully resets the hover transform and shadow, but does NOT touch
+        the skip/suppress flags that are used by the hoverEnter/hoverLeave
+        handshake for normal transitions.
+        """
+        self._hover_animation.stop()
+        self._hover_group.stop()
+        if self._hover_offset_anim is not None:
+            try:
+                self._hover_offset_anim.stop()
+            except RuntimeError:
+                pass
+            self._hover_offset_anim.deleteLater()
+            self._hover_offset_anim = None
+        self._hover_scale = 1.0
+        self._hover_shadow_enabled = False
+        self.setHoverOffset(0.0)
+        self._hand_hover_active = False
+        self.update()
+
+    def _hand_hover_target_offset(self) -> float:
+        return -float(self.h) / 2.0
+
+    def _should_use_hand_hover(self) -> bool:
+        return self._current_container_id() == "hand"
+
+    def _current_container_id(self) -> str:
         scene = self.scene()
-        if scene and hasattr(scene, "notify_hover_leave"):
-            scene.notify_hover_leave(self)
-        super().hoverLeaveEvent(ev)
+        if scene and hasattr(scene, "model"):
+            return scene.model.containers.get(self.card_id, "table")
+        return "table"
+
+    def _animate_hover_offset(self, start: float, end: float):
+        if self._hover_offset_anim is not None:
+            try:
+                self._hover_offset_anim.stop()
+            except RuntimeError:
+                pass
+            self._hover_offset_anim.deleteLater()
+            self._hover_offset_anim = None
+        anim = QPropertyAnimation(self, b"hoverOffset")
+        anim.setDuration(HOVER_ANIMATION_DURATION_MS)
+        anim.setStartValue(start)
+        anim.setEndValue(end)
+        anim.setEasingCurve(QEasingCurve.InOutSine)
+        anim.finished.connect(self._clear_hover_offset_anim)
+        anim.start()
+        self._hover_offset_anim = anim
+
+    def _clear_hover_offset_anim(self):
+        if self._hover_offset_anim is not None:
+            self._hover_offset_anim.deleteLater()
+        self._hover_offset_anim = None
 
     def itemChange(self, change, value):
         # Clamp while moving unless explicitly disabled (e.g., when confined inside a zone)
@@ -332,6 +539,17 @@ class Card(QGraphicsObject):
         # Notify after move
         if change == QGraphicsObject.GraphicsItemChange.ItemPositionHasChanged:
             self.moved.emit(self.pos())
+
+            # Track container transitions to switch hover modes cleanly.
+            # We want to drop the special hand-hover as soon as the card
+            # actually leaves the hand zone, so the next hover uses the
+            # table/default behavior.
+            prev_container = getattr(self, "_last_container_id", self._current_container_id())
+            current_container = self._current_container_id()
+            if prev_container == "hand" and current_container != "hand":
+                if self._hand_hover_active:
+                    self._cancel_hand_hover_for_rezone()
+            self._last_container_id = current_container
 
         return super().itemChange(change, value)
 
