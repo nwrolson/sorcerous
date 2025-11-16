@@ -1,6 +1,8 @@
+import weakref
+
 from PySide6.QtCore import (
     Qt, QRectF, QPointF, Signal, QVariantAnimation, QEasingCurve,
-    QSequentialAnimationGroup, QPropertyAnimation, Property
+    QSequentialAnimationGroup, QPropertyAnimation, Property, QEvent
 )
 # No TYPE_CHECKING import needed; we only access scene attributes dynamically.
 from PySide6.QtWidgets import QGraphicsObject
@@ -55,6 +57,7 @@ class Card(QGraphicsObject):
         self._hover_offset_anim = None
         self._hand_hover_dragged_out = False
         self._hand_hover_prev_z: float | None = None
+        self._hidden_viewports: weakref.WeakSet = weakref.WeakSet()
 
         # Front image
         self.pixmap: QPixmap | None = None
@@ -168,10 +171,36 @@ class Card(QGraphicsObject):
         if self._zone_hidden == hidden:
             return
         self._zone_hidden = hidden
-        self.setVisible(not hidden)
+        self._update_hidden_visibility()
         if not hidden:
             self._invalidate_item_cache()
         self.update()
+
+    def _update_hidden_visibility(self):
+        should_show = (not self._zone_hidden) or bool(self._hidden_viewports)
+        self.setVisible(should_show)
+
+    def add_hidden_viewport(self, viewport):
+        if viewport is None:
+            return
+        try:
+            self._hidden_viewports.add(viewport)
+        except TypeError:
+            return
+        if self._zone_hidden:
+            self._update_hidden_visibility()
+            self.update()
+
+    def remove_hidden_viewport(self, viewport):
+        if viewport is None:
+            return
+        try:
+            self._hidden_viewports.discard(viewport)
+        except TypeError:
+            return
+        if self._zone_hidden and not self._hidden_viewports:
+            self._update_hidden_visibility()
+            self.update()
 
     def set_clamp_to_scene(self, clamp: bool):
         self._clamp_to_scene = bool(clamp)
@@ -206,7 +235,14 @@ class Card(QGraphicsObject):
 
         # Choose face based on pass
         if self._zone_hidden:
-            return
+            if widget is None:
+                return
+            try:
+                allowed = widget in self._hidden_viewports
+            except TypeError:
+                allowed = False
+            if not allowed:
+                return
 
         face_down = (Card.render_target == "camera" and self.face_down)
 
@@ -251,6 +287,44 @@ class Card(QGraphicsObject):
             painter.setPen(QPen(QColor(0, 120, 215), 2))
             painter.setBrush(Qt.NoBrush)
             painter.drawRoundedRect(base.adjusted(1, 1, -1, -1), 8, 8)
+
+    def sceneEvent(self, event):
+        if self._zone_hidden and self._should_block_scene_event(event):
+            return False
+        return super().sceneEvent(event)
+
+    def _should_block_scene_event(self, event) -> bool:
+        event_type = event.type()
+        blocked = {
+            QEvent.GraphicsSceneMousePress,
+            QEvent.GraphicsSceneMouseRelease,
+            QEvent.GraphicsSceneMouseMove,
+            QEvent.GraphicsSceneMouseDoubleClick,
+            QEvent.GraphicsSceneHoverEnter,
+            QEvent.GraphicsSceneHoverMove,
+            QEvent.GraphicsSceneHoverLeave,
+            QEvent.GraphicsSceneWheel,
+            QEvent.GraphicsSceneDragEnter,
+            QEvent.GraphicsSceneDragMove,
+            QEvent.GraphicsSceneDragLeave,
+            QEvent.GraphicsSceneDrop,
+            QEvent.GraphicsSceneContextMenu,
+        }
+        if event_type not in blocked:
+            return False
+        return not self._allow_hidden_event(event)
+
+    def _allow_hidden_event(self, event) -> bool:
+        if not self._hidden_viewports:
+            return False
+        widget_getter = getattr(event, "widget", None)
+        viewport = widget_getter() if callable(widget_getter) else None
+        if viewport is None:
+            return False
+        try:
+            return viewport in self._hidden_viewports
+        except TypeError:
+            return False
 
     # ------- Interaction -------
 

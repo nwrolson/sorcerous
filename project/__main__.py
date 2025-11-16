@@ -4,6 +4,7 @@ import numpy as np
 import sys
 import time
 import statistics
+from weakref import WeakSet
 
 from PySide6.QtCore import Qt, QPointF, QTimer, QRectF, QPoint, Slot
 from PySide6.QtGui import QImage, QUndoStack, QPainter, QCursor
@@ -16,8 +17,11 @@ from camera.camera import VirtualCamThread
 from zones.hand import HandZone
 from zones.library import LibraryZone
 from zones.preview import PreviewZone
+from zones.graveyard import GraveyardZone
+from zones.zone import Zone
 from card.card import Card
 from ui.deck_view import ListViewWidget
+from ui.zone_viewer import ZoneViewerMenu
 from ui.load_menu import LoadMenu
 from ui.loading_spinner import LoadingSpinner
 from cache.cache import ScryfallImageCache
@@ -61,6 +65,8 @@ class MainWindow(QMainWindow):
             modifiers=Qt.ControlModifier,
         )
         self.view.register_shortcut(Qt.Key_L, lambda ev: self._toggle_deck_view())
+        self.view.register_shortcut(Qt.Key_V, lambda ev: self._toggle_zone_viewer())
+        self.view.register_shortcut(Qt.Key_G, lambda ev: self._handle_graveyard_shortcut())
         self.view.register_shortcut(Qt.Key_X, self._handle_delete_shortcut)
         self.view.register_shortcut(Qt.Key_Escape, self._handle_escape_shortcut)
 
@@ -72,16 +78,25 @@ class MainWindow(QMainWindow):
         self.deck_view_widget.cardSelected.connect(self._handle_deck_selection)
         self._deck_view_user_pos: QPoint | None = None
         self.deck_view_widget.hide()
+        self.zone_viewer = ZoneViewerMenu(parent=self)
+        self.zone_viewer.set_scene(self.scene)
+        self.zone_viewer.closeRequested.connect(self._hide_zone_viewer)
+        self.zone_viewer.dragMoved.connect(self._on_zone_viewer_moved)
+        self.zone_viewer.zoneChanged.connect(self._handle_zone_viewer_zone_changed)
+        self._zone_viewer_user_pos: QPoint | None = None
+        self.zone_viewer.hide()
         spinner_icon = BASE_DIR / "resources" / "brass-eye.svg"
         self.loading_spinner = LoadingSpinner(spinner_icon, self)
         self.loading_spinner.hide()
         self.undo.indexChanged.connect(self._refresh_deck_view)
+        self.undo.indexChanged.connect(self._refresh_zone_viewer)
 
         # Freeze window size after initial layout
         QTimer.singleShot(0, self._sync_scene_rect_to_viewport)
         QTimer.singleShot(0, self._position_load_menu)
         QTimer.singleShot(0, self._position_loading_spinner)
         QTimer.singleShot(0, self._position_deck_view)
+        QTimer.singleShot(0, self._position_zone_viewer)
 
         # Virtual cam setup
         self.frame_queue: queue.Queue = queue.Queue(maxsize=1)
@@ -95,13 +110,18 @@ class MainWindow(QMainWindow):
         # Populate items
         self.hand_zone = HandZone("hand")
         self.library_zone = LibraryZone("library")
+        self.graveyard_zone = GraveyardZone("graveyard")
         self.preview_zone = PreviewZone("preview", width=260, slot_h=360)
         self.scene.add_zone(self.hand_zone, QPointF(0, 0))
         self.scene.add_zone(self.library_zone, QPointF(0, 0))
+        self.scene.add_zone(self.graveyard_zone, QPointF(0, 0))
+        self.graveyard_zone.move_offscreen()
         self.scene.add_zone(self.preview_zone, QPointF(0, 0))
         self.preview_zone.setVisible(False)
         self.deck_view_widget.set_preview_sources(self.scene, self.preview_zone)
         self.deck_view_widget.previewAreaChanged.connect(self._position_preview_zone)
+        self.zone_viewer.set_available_zones([self.graveyard_zone, self.library_zone])
+        self.zone_viewer.show_zone(self.graveyard_zone.zone_id)
 
         cache_root = BASE_DIR / "scryfall-cache"
         self.card_cache = ScryfallImageCache(
@@ -126,6 +146,8 @@ class MainWindow(QMainWindow):
         self._stack_selection_key: tuple[str, ...] | None = None
         self._stack_anchor_point: QPointF | None = None
         self._preview_state: dict | None = None
+        self._drag_visible_cards: WeakSet[Card] = WeakSet()
+        self._drag_rehide_cards: WeakSet[Card] = WeakSet()
 
     def _qimage_to_rgb(self, img: QImage) -> np.ndarray:
         # Ensure RGBA8888
@@ -189,6 +211,7 @@ class MainWindow(QMainWindow):
         self._position_load_menu()
         self._position_loading_spinner()
         self._position_deck_view()
+        self._position_zone_viewer()
 
     def _sync_scene_rect_to_viewport(self):
         view_src = self.view.mapToScene(self.view.viewport().rect()).boundingRect()
@@ -277,6 +300,24 @@ class MainWindow(QMainWindow):
         preview.reflow_cards()
         widget.sync_preview_zone_view()
 
+    def _position_zone_viewer(self):
+        viewer = getattr(self, "zone_viewer", None)
+        if viewer is None:
+            return
+        viewer.resize_for_window(self.size())
+        size = viewer.size()
+        user_pos = getattr(self, "_zone_viewer_user_pos", None)
+        if user_pos is None:
+            top_left = QPoint(
+                max(0, self.width() - size.width() - 24),
+                max(0, 32),
+            )
+        else:
+            top_left = self._clamp_point_to_window(user_pos, size)
+        viewer.move(top_left)
+        if viewer.isVisible():
+            viewer.raise_()
+
     def _clamp_point_to_window(self, pos: QPoint, size) -> QPoint:
         max_x = max(0, self.width() - size.width())
         max_y = max(0, self.height() - size.height())
@@ -291,6 +332,7 @@ class MainWindow(QMainWindow):
         self.deck_view_widget.set_cards(self._library_card_entries())
         self._sync_preview_state()
         self._position_preview_zone()
+        self._refresh_zone_viewer()
 
     def _library_card_entries(self) -> list[dict[str, object]]:
         library = getattr(self, "library_zone", None)
@@ -433,6 +475,18 @@ class MainWindow(QMainWindow):
         self.deck_view_widget.raise_()
         self._position_preview_zone()
 
+    def _toggle_zone_viewer(self):
+        viewer = getattr(self, "zone_viewer", None)
+        if viewer is None:
+            return
+        if viewer.isVisible():
+            self._hide_zone_viewer()
+            return
+        self._refresh_zone_viewer()
+        self._position_zone_viewer()
+        viewer.show()
+        viewer.raise_()
+
     def _handle_escape_shortcut(self, ev=None):
         load_menu = getattr(self, "load_menu", None)
         if load_menu is None:
@@ -516,6 +570,33 @@ class MainWindow(QMainWindow):
         self._refresh_deck_view()
         self._on_card_action()
 
+    def _handle_graveyard_shortcut(self, ev=None):
+        scene = getattr(self, "scene", None)
+        zone = getattr(self, "graveyard_zone", None)
+        if scene is None or zone is None:
+            return
+        selected_cards = [item for item in scene.selectedItems() if isinstance(item, Card)]
+        hover_card = getattr(scene, "hover_card", None)
+        if hover_card and hover_card not in selected_cards:
+            selected_cards.append(hover_card)
+        if not selected_cards:
+            return
+        if getattr(self, "_preview_state", None):
+            preview_card = self._preview_state.get("card")
+            if preview_card in selected_cards:
+                self._clear_preview(return_to_library=False)
+        table_positions = {card.card_id: QPointF(card.pos()) for card in selected_cards}
+        cmd = InsertIntoZoneCommand(
+            self.model,
+            self.scene.zones,
+            selected_cards,
+            zone,
+            len(zone.cards),
+            table_pos=table_positions,
+        )
+        self.undo.push(cmd)
+        self._on_card_action()
+
     def _hide_deck_view(self):
         if not hasattr(self, "deck_view_widget") or self.deck_view_widget is None:
             return
@@ -523,6 +604,12 @@ class MainWindow(QMainWindow):
         self._clear_preview(return_to_library=True)
         if hasattr(self, "preview_zone") and self.preview_zone:
             self.preview_zone.setVisible(False)
+
+    def _hide_zone_viewer(self):
+        viewer = getattr(self, "zone_viewer", None)
+        if viewer is None:
+            return
+        viewer.hide()
 
     def _on_deck_view_moved(self, pos: QPoint):
         if not hasattr(self, "deck_view_widget") or self.deck_view_widget is None:
@@ -534,6 +621,47 @@ class MainWindow(QMainWindow):
         self._deck_view_user_pos = clamped
         self._position_preview_zone()
 
+    def _on_zone_viewer_moved(self, pos: QPoint):
+        viewer = getattr(self, "zone_viewer", None)
+        if viewer is None:
+            return
+        size = viewer.size()
+        clamped = self._clamp_point_to_window(pos, size)
+        if clamped != pos:
+            viewer.move(clamped)
+        self._zone_viewer_user_pos = clamped
+
+    def _refresh_zone_viewer(self, *_):
+        viewer = getattr(self, "zone_viewer", None)
+        scene = getattr(self, "scene", None)
+        if viewer is None or scene is None:
+            return
+        scene_zones = list(getattr(scene, "zones", {}).values())
+        ordered: list[Zone] = []
+
+        def append_zone(candidate):
+            if candidate and candidate in scene_zones and candidate not in ordered:
+                ordered.append(candidate)
+
+        append_zone(getattr(self, "graveyard_zone", None))
+        append_zone(getattr(self, "library_zone", None))
+        for zone in scene_zones:
+            if zone not in ordered:
+                ordered.append(zone)
+        if not ordered and hasattr(self, "library_zone"):
+            ordered = [self.library_zone]
+        viewer.set_available_zones(ordered)
+        viewer.sync_zone_geometry()
+
+    def _handle_zone_viewer_zone_changed(self, zone_id: str):
+        scene = getattr(self, "scene", None)
+        viewer = getattr(self, "zone_viewer", None)
+        if scene is None or viewer is None:
+            return
+        if zone_id not in scene.zones:
+            return
+        viewer.sync_zone_geometry()
+
     def _wrap_release(self, original_release, card: Card):
         def handler(ev):
             original_release(ev)
@@ -543,6 +671,8 @@ class MainWindow(QMainWindow):
                 if dragged:
                     self._clear_stack_anchor()
                 self._on_card_action()
+            if dragged:
+                self._reset_zone_drag_visibility()
         return handler
 
     def _handle_tap_shortcut(self):
@@ -706,6 +836,7 @@ class MainWindow(QMainWindow):
 
     def _on_card_manual_drag(self, card: Card):
         self._clear_stack_anchor()
+        self._ensure_zone_drag_visibility(card)
 
     def _clear_stack_anchor(self):
         self._stack_selection_key = None
@@ -807,6 +938,50 @@ class MainWindow(QMainWindow):
             return
         self._last_capture_time = now
         self.capture_and_queue_frame()
+
+    def _ensure_zone_drag_visibility(self, anchor_card: Card):
+        scene = getattr(self, "scene", None)
+        view = getattr(self, "view", None)
+        if scene is None or view is None:
+            return
+        viewport = view.viewport()
+        if viewport is None:
+            return
+        selected_cards = [it for it in scene.selectedItems() if isinstance(it, Card)]
+        if anchor_card not in selected_cards:
+            selected_cards.append(anchor_card)
+        for card in selected_cards:
+            add_override = getattr(card, "add_hidden_viewport", None)
+            if callable(add_override):
+                add_override(viewport)
+                self._drag_visible_cards.add(card)
+            if getattr(card, "_zone_hidden", False):
+                card.set_zone_hidden(False)
+                self._drag_rehide_cards.add(card)
+
+    def _reset_zone_drag_visibility(self):
+        if not self._drag_visible_cards:
+            return
+        view = getattr(self, "view", None)
+        viewport = view.viewport() if view else None
+        for card in list(self._drag_visible_cards):
+            remove_override = getattr(card, "remove_hidden_viewport", None)
+            if callable(remove_override) and viewport is not None:
+                remove_override(viewport)
+        self._drag_visible_cards.clear()
+        if self._drag_rehide_cards:
+            scene = getattr(self, "scene", None)
+            model = getattr(self, "model", None)
+            for card in list(self._drag_rehide_cards):
+                container = None
+                if model is not None:
+                    container = model.containers.get(card.card_id)
+                zone = None
+                if scene is not None and container:
+                    zone = scene.zones.get(container)
+                if zone and getattr(zone, "hide_cards", False):
+                    card.set_zone_hidden(True)
+            self._drag_rehide_cards.clear()
 
     def set_stream_params(self, width: int, height: int, fps: float):
         self.vcam_thread.update_params(width, height, fps)
