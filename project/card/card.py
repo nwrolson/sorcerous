@@ -14,6 +14,7 @@ HOVER_SHADOW_COLOR = QColor(0, 0, 0, 120)
 HOVER_SHADOW_OFFSET_X = 8
 HOVER_SHADOW_OFFSET_Y = 8
 HOVER_SHADOW_EXPANSION = 4
+HAND_HOVER_Z_VALUE = 50.0
 
 
 class Card(QGraphicsObject):
@@ -32,9 +33,11 @@ class Card(QGraphicsObject):
                  id: int = 0,
                  back_image_path: str | None = None,
                  thumbnail_path: str | None = None,
-                 card_data: dict | None = None):
+                 card_data: dict | None = None,
+                 print_id: str | None = None):
         super().__init__()
         self.card_id = card_id
+        self.print_id = print_id or card_id
         self.w = w
         self.h = h
         self.color = color
@@ -51,6 +54,7 @@ class Card(QGraphicsObject):
         self._suppress_default_hover_enter = False
         self._hover_offset_anim = None
         self._hand_hover_dragged_out = False
+        self._hand_hover_prev_z: float | None = None
 
         # Front image
         self.pixmap: QPixmap | None = None
@@ -235,8 +239,11 @@ class Card(QGraphicsObject):
             painter.drawRoundedRect(base, 8, 8)
             painter.setBrush(QBrush(QColor(210, 210, 210)))
             painter.drawRoundedRect(QRectF(0, 0, self.w, 20), 8, 8)
-            painter.drawText(base.adjusted(6, 22, -6, -6),
-                             Qt.AlignLeft | Qt.AlignTop, self.card_id)
+            painter.drawText(
+                base.adjusted(6, 22, -6, -6),
+                Qt.AlignLeft | Qt.AlignTop,
+                self.print_id,
+            )
 
         # Hide selection chrome in camera pass
         if self.isSelected() and Card.render_target != "camera":
@@ -262,7 +269,7 @@ class Card(QGraphicsObject):
                 self.setSelected(True)
                 items = [self]
             self._selection_offsets = [(it, it.pos() - self.pos()) for it in items]
-            self.setZValue(10)
+            self.setZValue(max(self.zValue(), 10))
         super().mousePressEvent(ev)
 
 
@@ -398,6 +405,7 @@ class Card(QGraphicsObject):
         self._hover_scale = 1.0
         self._hover_shadow_enabled = True
         self._hand_hover_active = True
+        self._apply_hand_hover_zboost()
         self.setCacheMode(QGraphicsObject.NoCache)
         current = self._hover_offset
         target = self._hand_hover_target_offset()
@@ -418,6 +426,7 @@ class Card(QGraphicsObject):
         else:
             self.setHoverOffset(0.0)
         self._hand_hover_active = False
+        self._restore_hand_hover_zboost()
         self.update()
 
     def _cancel_hand_hover_for_drag(self):
@@ -445,6 +454,7 @@ class Card(QGraphicsObject):
 
         # We're no longer in the special hand-hover mode
         self._hand_hover_active = False
+        self._restore_hand_hover_zboost()
         # Do NOT touch _skip_default_hover_leave / _suppress_default_hover_enter here
 
 
@@ -465,6 +475,7 @@ class Card(QGraphicsObject):
         self._hand_hover_cancel_on_leave = False
         self._skip_default_hover_leave = True
         self._suppress_default_hover_enter = True
+        self._restore_hand_hover_zboost()
         self.update()
 
     def _cancel_hand_hover_for_rezone(self):
@@ -486,8 +497,22 @@ class Card(QGraphicsObject):
         self._hover_scale = 1.0
         self._hover_shadow_enabled = False
         self.setHoverOffset(0.0)
+        self._restore_hand_hover_zboost()
         self._hand_hover_active = False
         self.update()
+
+    def _apply_hand_hover_zboost(self):
+        if self._hand_hover_prev_z is None:
+            self._hand_hover_prev_z = self.zValue()
+        if self.zValue() < HAND_HOVER_Z_VALUE:
+            self.setZValue(HAND_HOVER_Z_VALUE)
+
+    def _restore_hand_hover_zboost(self):
+        if self._hand_hover_prev_z is None:
+            return
+        if self.zValue() >= HAND_HOVER_Z_VALUE:
+            self.setZValue(self._hand_hover_prev_z)
+        self._hand_hover_prev_z = None
 
     def _hand_hover_target_offset(self) -> float:
         return -float(self.h) / 2.0

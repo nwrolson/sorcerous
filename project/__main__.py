@@ -299,7 +299,7 @@ class MainWindow(QMainWindow):
         entries: list[dict[str, object]] = []
         for card in library.cards:
             data = getattr(card, "card_data", None) or {}
-            display_name = data.get("name") or card.card_id
+            display_name = data.get("name") or getattr(card, "print_id", card.card_id)
             entries.append(
                 {
                     "card_id": getattr(card, "id", -1),
@@ -358,7 +358,8 @@ class MainWindow(QMainWindow):
         card_data = getattr(card, "card_data", None) or {}
         name = card_data.get("name") if isinstance(card_data, dict) else None
         if self.deck_view_widget:
-            self.deck_view_widget.set_preview_title(name or card.card_id)
+            label = name or getattr(card, "print_id", card.card_id)
+            self.deck_view_widget.set_preview_title(label)
             self.deck_view_widget.sync_preview_zone_view()
         self._preview_state = {
             "card": card,

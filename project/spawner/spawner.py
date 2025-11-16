@@ -116,17 +116,19 @@ class CardSpawner(QObject):
         if not back_image:
             back_image = self._default_back_image_path
 
-        card_id = self._allocate_card_id()
+        instance_id = self._allocate_card_id()
+        unique_card_id = f"{result.id}#{instance_id}"
         thumbnail_path = self._cache.fetch_thumbnail(result.id)
         card = Card(
-            card_id=result.id,
+            card_id=unique_card_id,
             image_path=front_image,
             back_image_path=back_image,
             thumbnail_path=thumbnail_path,
             w=width if width is not None else self._default_width,
             h=height if height is not None else self._default_height,
-            id=card_id,
+            id=instance_id,
             card_data=result.data,
+            print_id=result.id,
         )
         self._register_card(card)
 
