@@ -1,4 +1,5 @@
 import queue
+import random
 import numpy as np
 import sys
 import time
@@ -53,6 +54,7 @@ class MainWindow(QMainWindow):
         self.view.register_shortcut(Qt.Key_T, lambda ev: self._handle_tap_shortcut())
         self.view.register_shortcut(Qt.Key_Q, lambda ev: self._handle_stack_shortcut(ev))
         self.view.register_shortcut(Qt.Key_D, lambda ev: self._handle_draw_shortcut())
+        self.view.register_shortcut(Qt.Key_S, lambda ev: self._handle_shuffle_shortcut())
         self.view.register_shortcut(Qt.Key_L, lambda ev: self._toggle_deck_view())
         self.view.register_shortcut(Qt.Key_X, self._handle_delete_shortcut)
         self.view.register_shortcut(Qt.Key_Escape, self._handle_escape_shortcut)
@@ -636,6 +638,17 @@ class MainWindow(QMainWindow):
             table_pos=table_positions,
         )
         self.undo.push(cmd)
+        self._on_card_action()
+
+    def _handle_shuffle_shortcut(self):
+        library = getattr(self, "library_zone", None)
+        cards = getattr(library, "cards", None) if library is not None else None
+        if not cards or len(cards) < 2:
+            return
+        random.shuffle(cards)
+        library.reflow_cards()
+        self._update_zone_state(library)
+        self._refresh_deck_view()
         self._on_card_action()
 
     def _cursor_scene_pos(self) -> QPointF | None:

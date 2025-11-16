@@ -30,7 +30,7 @@ class DeckListDelegate(QStyledItemDelegate):
 
     THUMB_SIZE = QSize(275, 100)
     PADDING = 8
-    MANA_TEXT_GAP = 12
+    MANA_TEXT_GAP = 32
     MANA_SYMBOL_SPACING = 4
     MANA_SEPARATOR_SPACING = 4
     MANA_DELIMITER = "//"

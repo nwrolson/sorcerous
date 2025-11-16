@@ -44,6 +44,7 @@ class Card(QGraphicsObject):
         self.card_data = card_data
         self._back_image_path = back_image_path
         self._thumbnail_path = thumbnail_path
+        self._clamp_to_scene = True
 
         # Front image
         self.pixmap: QPixmap | None = None
@@ -68,8 +69,8 @@ class Card(QGraphicsObject):
             | QGraphicsObject.ItemIsSelectable
             | QGraphicsObject.ItemSendsGeometryChanges
         )
-        # Default cache; switched to NoCache during hover scale/offset animation
-        self.setCacheMode(QGraphicsObject.ItemCoordinateCache)
+        # Disable item caching so every paint uses the card's latest art.
+        self.setCacheMode(QGraphicsObject.NoCache)
 
         self._press_pos: QPointF | None = None
         self._press_item_pos: QPointF | None = None
@@ -158,12 +159,22 @@ class Card(QGraphicsObject):
             return
         self._zone_hidden = hidden
         self.setVisible(not hidden)
+        if not hidden:
+            self._invalidate_item_cache()
+        self.update()
+
+    def set_clamp_to_scene(self, clamp: bool):
+        self._clamp_to_scene = bool(clamp)
+
+    def _invalidate_item_cache(self):
+        """Force an immediate repaint using the live pixmap."""
         self.update()
 
     def set_face_down(self, face_down: bool):
         if self.face_down == face_down:
             return
         self.face_down = face_down
+        self._invalidate_item_cache()
         self.update()
 
     # ------- Painting -------
@@ -298,7 +309,6 @@ class Card(QGraphicsObject):
         ret.setStartValue(self._hover_offset)
         ret.setEndValue(0.0)
         ret.setEasingCurve(QEasingCurve.InOutSine)
-        ret.finished.connect(lambda: self.setCacheMode(QGraphicsObject.ItemCoordinateCache))
         ret.start(QPropertyAnimation.DeleteWhenStopped)
         self.update()
         scene = self.scene()
@@ -307,8 +317,12 @@ class Card(QGraphicsObject):
         super().hoverLeaveEvent(ev)
 
     def itemChange(self, change, value):
-        # Clamp while moving
-        if change == QGraphicsObject.GraphicsItemChange.ItemPositionChange and self.scene():
+        # Clamp while moving unless explicitly disabled (e.g., when confined inside a zone)
+        if (
+            self._clamp_to_scene
+            and change == QGraphicsObject.GraphicsItemChange.ItemPositionChange
+            and self.scene()
+        ):
             new_pos = QPointF(value)  # proposed pos in scene coords
             rect = self.scene().sceneRect()
             x = max(rect.left(),  min(new_pos.x(), rect.right()  - self.w))

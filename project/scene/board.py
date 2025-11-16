@@ -1,4 +1,4 @@
-from typing import Callable
+﻿from typing import Callable
 
 from PySide6.QtGui import (
     QUndoStack, QKeyEvent
@@ -170,8 +170,17 @@ class BoardView(QGraphicsView):
             factor = new_scale / self._scale
             self.scale(factor, factor)
             self._scale = new_scale
-        else:
-            super().wheelEvent(ev)
+            return
+
+        hbar = self.horizontalScrollBar()
+        vbar = self.verticalScrollBar()
+        h_val = hbar.value() if hbar else 0
+        v_val = vbar.value() if vbar else 0
+        super().wheelEvent(ev)
+        if hbar and hbar.value() != h_val:
+            hbar.setValue(h_val)
+        if vbar and vbar.value() != v_val:
+            vbar.setValue(v_val)
 
     def mousePressEvent(self, ev):
         if ev.button() == Qt.LeftButton:

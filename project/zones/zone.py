@@ -118,6 +118,8 @@ class Zone(QGraphicsObject):
         self.cards.insert(idx, card)
         if hasattr(card, "set_tapped"):
             card.set_tapped(False)
+        if hasattr(card, "set_clamp_to_scene"):
+            card.set_clamp_to_scene(False)
         if self.hide_cards:
             card.set_face_down(True)
             card.set_zone_hidden(self._suppress_paint_when_hidden)
@@ -128,6 +130,8 @@ class Zone(QGraphicsObject):
             return
         self.prepareGeometryChange()
         self.cards.remove(card)
+        if hasattr(card, "set_clamp_to_scene"):
+            card.set_clamp_to_scene(True)
         if self.hide_cards:
             card.set_face_down(False)
             if self._suppress_paint_when_hidden:
