@@ -22,6 +22,7 @@ from zones.zone import Zone
 from card.card import Card
 from ui.deck_view import ListViewWidget
 from ui.zone_viewer import ZoneViewerMenu
+from ui.hidden_zone_proxy_controller import HiddenZoneProxyController
 from ui.load_menu import LoadMenu
 from ui.loading_spinner import LoadingSpinner
 from cache.cache import ScryfallImageCache
@@ -79,7 +80,6 @@ class MainWindow(QMainWindow):
         self._deck_view_user_pos: QPoint | None = None
         self.deck_view_widget.hide()
         self.zone_viewer = ZoneViewerMenu(parent=self)
-        self.zone_viewer.set_scene(self.scene)
         self.zone_viewer.closeRequested.connect(self._hide_zone_viewer)
         self.zone_viewer.dragMoved.connect(self._on_zone_viewer_moved)
         self.zone_viewer.zoneChanged.connect(self._handle_zone_viewer_zone_changed)
@@ -115,12 +115,15 @@ class MainWindow(QMainWindow):
         self.scene.add_zone(self.hand_zone, QPointF(0, 0))
         self.scene.add_zone(self.library_zone, QPointF(0, 0))
         self.scene.add_zone(self.graveyard_zone, QPointF(0, 0))
-        self.graveyard_zone.move_offscreen()
         self.scene.add_zone(self.preview_zone, QPointF(0, 0))
+        self.graveyard_zone.move_offscreen()
+        self.hidden_zone_proxy = HiddenZoneProxyController(self.graveyard_zone, self.view, self.scene, self.model)
+        self.zone_viewer.set_scene(self.hidden_zone_proxy.proxy_scene())
+        self.zone_viewer.set_column_width(int(self.graveyard_zone.width + 48))
         self.preview_zone.setVisible(False)
         self.deck_view_widget.set_preview_sources(self.scene, self.preview_zone)
         self.deck_view_widget.previewAreaChanged.connect(self._position_preview_zone)
-        self.zone_viewer.set_available_zones([self.graveyard_zone, self.library_zone])
+        self.zone_viewer.set_available_zones([self.graveyard_zone])
         self.zone_viewer.show_zone(self.graveyard_zone.zone_id)
 
         cache_root = BASE_DIR / "scryfall-cache"
@@ -142,6 +145,7 @@ class MainWindow(QMainWindow):
 
         self._register_existing_cards()
         self._refresh_deck_view()
+
         self._last_stack_cycle_ids: list[str] = []
         self._stack_selection_key: tuple[str, ...] | None = None
         self._stack_anchor_point: QPointF | None = None
@@ -575,27 +579,48 @@ class MainWindow(QMainWindow):
         zone = getattr(self, "graveyard_zone", None)
         if scene is None or zone is None:
             return
-        selected_cards = [item for item in scene.selectedItems() if isinstance(item, Card)]
-        hover_card = getattr(scene, "hover_card", None)
-        if hover_card and hover_card not in selected_cards:
-            selected_cards.append(hover_card)
+        selected_cards = self._selected_cards_for_drop()
         if not selected_cards:
             return
         if getattr(self, "_preview_state", None):
             preview_card = self._preview_state.get("card")
             if preview_card in selected_cards:
                 self._clear_preview(return_to_library=False)
-        table_positions = {card.card_id: QPointF(card.pos()) for card in selected_cards}
+        self._insert_cards_into_zone(selected_cards, zone)
+        self._refresh_hidden_proxy()
+
+    def _selected_cards_for_drop(self, primary: Card | None = None) -> list[Card]:
+        scene = getattr(self, "scene", None)
+        if scene is None:
+            return []
+        selected_cards = [item for item in scene.selectedItems() if isinstance(item, Card)]
+        if primary and primary not in selected_cards:
+            selected_cards.append(primary)
+        hover_card = getattr(scene, "hover_card", None)
+        if hover_card and hover_card not in selected_cards:
+            selected_cards.append(hover_card)
+        return selected_cards
+
+    def _insert_cards_into_zone(self, cards: list[Card], zone: Zone):
+        if not cards or zone is None:
+            return
+        table_positions = {card.card_id: QPointF(card.pos()) for card in cards}
         cmd = InsertIntoZoneCommand(
             self.model,
             self.scene.zones,
-            selected_cards,
+            cards,
             zone,
             len(zone.cards),
             table_pos=table_positions,
         )
         self.undo.push(cmd)
         self._on_card_action()
+
+    def _refresh_hidden_proxy(self):
+        proxy = getattr(self, "hidden_zone_proxy", None)
+        viewer = getattr(self, "zone_viewer", None)
+        if proxy and viewer and viewer.isVisible():
+            proxy.refresh()
 
     def _hide_deck_view(self):
         if not hasattr(self, "deck_view_widget") or self.deck_view_widget is None:
@@ -610,6 +635,9 @@ class MainWindow(QMainWindow):
         if viewer is None:
             return
         viewer.hide()
+        proxy = getattr(self, "hidden_zone_proxy", None)
+        if proxy:
+            proxy.refresh()
 
     def _on_deck_view_moved(self, pos: QPoint):
         if not hasattr(self, "deck_view_widget") or self.deck_view_widget is None:
@@ -633,37 +661,41 @@ class MainWindow(QMainWindow):
 
     def _refresh_zone_viewer(self, *_):
         viewer = getattr(self, "zone_viewer", None)
-        scene = getattr(self, "scene", None)
-        if viewer is None or scene is None:
+        if viewer is None:
             return
-        scene_zones = list(getattr(scene, "zones", {}).values())
-        ordered: list[Zone] = []
-
-        def append_zone(candidate):
-            if candidate and candidate in scene_zones and candidate not in ordered:
-                ordered.append(candidate)
-
-        append_zone(getattr(self, "graveyard_zone", None))
-        append_zone(getattr(self, "library_zone", None))
-        for zone in scene_zones:
-            if zone not in ordered:
-                ordered.append(zone)
-        if not ordered and hasattr(self, "library_zone"):
-            ordered = [self.library_zone]
-        viewer.set_available_zones(ordered)
-        viewer.sync_zone_geometry()
+        hidden_zones: list[Zone] = []
+        graveyard = getattr(self, "graveyard_zone", None)
+        if graveyard is not None:
+            hidden_zones.append(graveyard)
+        viewer.set_available_zones(hidden_zones)
+        proxy = getattr(self, "hidden_zone_proxy", None)
+        if proxy:
+            proxy.refresh()
 
     def _handle_zone_viewer_zone_changed(self, zone_id: str):
-        scene = getattr(self, "scene", None)
-        viewer = getattr(self, "zone_viewer", None)
-        if scene is None or viewer is None:
-            return
-        if zone_id not in scene.zones:
-            return
-        viewer.sync_zone_geometry()
+        proxy = getattr(self, "hidden_zone_proxy", None)
+        if proxy:
+            proxy.refresh()
 
     def _wrap_release(self, original_release, card: Card):
         def handler(ev):
+            viewer = getattr(self, "zone_viewer", None)
+            drop_to_graveyard = False
+            if viewer and viewer.isVisible():
+                rect = viewer.viewport_rect_global()
+                pos = ev.screenPos()
+                if hasattr(pos, "toPoint"):
+                    pos = pos.toPoint()
+                if rect.contains(pos):
+                    drop_to_graveyard = True
+            if drop_to_graveyard and ev.button() == Qt.LeftButton:
+                dragged = card.consume_user_drag() if hasattr(card, "consume_user_drag") else False
+                cards = self._selected_cards_for_drop(card)
+                self._insert_cards_into_zone(cards, getattr(self, "graveyard_zone", None))
+                if dragged:
+                    self._clear_stack_anchor()
+                self._refresh_hidden_proxy()
+                return
             original_release(ev)
             dragged = card.consume_user_drag() if hasattr(card, "consume_user_drag") else False
             if ev.button() == Qt.LeftButton:
