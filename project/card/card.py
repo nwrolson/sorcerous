@@ -17,6 +17,7 @@ HOVER_SHADOW_OFFSET_X = 8
 HOVER_SHADOW_OFFSET_Y = 8
 HOVER_SHADOW_EXPANSION = 4
 HAND_HOVER_Z_VALUE = 50.0
+DRAG_Z_VALUE = 10000.0
 
 
 class Card(QGraphicsObject):
@@ -57,6 +58,7 @@ class Card(QGraphicsObject):
         self._hover_offset_anim = None
         self._hand_hover_dragged_out = False
         self._hand_hover_prev_z: float | None = None
+        self._drag_prev_z: float | None = None
         self._hidden_viewports: weakref.WeakSet = weakref.WeakSet()
 
         # Front image
@@ -333,6 +335,8 @@ class Card(QGraphicsObject):
             self._press_pos = ev.scenePos()
             self._press_item_pos = QPointF(self.pos())
             self._dragged_by_user = False
+            self._drag_prev_z = self.zValue()
+            self.setZValue(DRAG_Z_VALUE)
 
             # New: we're starting a new interaction, so reset this
             self._hand_hover_dragged_out = False
@@ -401,7 +405,11 @@ class Card(QGraphicsObject):
 
 
     def mouseReleaseEvent(self, ev):
-        self.setZValue(0)
+        if self._drag_prev_z is not None:
+            self.setZValue(self._drag_prev_z)
+        else:
+            self.setZValue(0)
+        self._drag_prev_z = None
         self._press_pos = None
         self._press_item_pos = None
         self._selection_offsets.clear()
