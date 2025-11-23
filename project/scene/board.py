@@ -9,7 +9,7 @@ from PySide6.QtWidgets import (
 )
 
 from PySide6.QtCore import (
-    QPoint, QPointF, QRect, Qt
+    QPoint, QPointF, QRect, Qt, Signal
 )
 
 from commands.commands import InsertIntoZoneCommand, RemoveFromZoneCommand
@@ -145,6 +145,9 @@ class BoardScene(QGraphicsScene):
             zone.cards[:] = original_order
 
 class BoardView(QGraphicsView):
+    cardContextRequested = Signal(Card, QPoint)
+    tableContextRequested = Signal(QPoint, QPointF)
+
     def __init__(self, scene: BoardScene):
         super().__init__(scene)
         self.setDragMode(QGraphicsView.DragMode.NoDrag)
@@ -201,6 +204,17 @@ class BoardView(QGraphicsView):
             self._end_drag_select()
             return
         super().mouseReleaseEvent(ev)
+
+    def contextMenuEvent(self, ev):
+        view_pos = ev.pos()
+        item = self.itemAt(view_pos)
+        if isinstance(item, Card):
+            self.cardContextRequested.emit(item, ev.globalPos())
+            ev.accept()
+            return
+        scene_pos = self.mapToScene(view_pos)
+        self.tableContextRequested.emit(ev.globalPos(), scene_pos)
+        ev.accept()
 
     def keyPressEvent(self, ev):
         entry = self._shortcut_handlers.get((ev.key(), self._normalize_modifiers(ev.modifiers())))

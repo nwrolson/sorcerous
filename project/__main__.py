@@ -6,7 +6,7 @@ import time
 import statistics
 from weakref import WeakSet
 
-from PySide6.QtCore import Qt, QPointF, QTimer, QRectF, QPoint, Slot
+from PySide6.QtCore import Qt, QPointF, QTimer, QRectF, QPoint, Slot, QThread
 from PySide6.QtGui import QImage, QUndoStack, QPainter, QCursor
 from PySide6.QtWidgets import QApplication, QMainWindow, QFrame, QGraphicsView
 
@@ -25,6 +25,9 @@ from ui.zone_viewer import ZoneViewerMenu
 from ui.hidden_zone_proxy_controller import HiddenZoneProxyController
 from ui.load_menu import LoadMenu
 from ui.loading_spinner import LoadingSpinner
+from ui.context_menu import CardContextMenu, TableContextMenu, ScryfallSearchMenu
+from loader.loader import DeckLoader, DeckLoaderError
+from _scryfall_search_worker import _ScryfallSearchWorker
 from cache.cache import ScryfallImageCache
 from spawner.spawner import CardSpawner
 
@@ -70,6 +73,8 @@ class MainWindow(QMainWindow):
         self.view.register_shortcut(Qt.Key_G, lambda ev: self._handle_graveyard_shortcut())
         self.view.register_shortcut(Qt.Key_X, self._handle_delete_shortcut)
         self.view.register_shortcut(Qt.Key_Escape, self._handle_escape_shortcut)
+        self.view.cardContextRequested.connect(self._show_card_context_menu)
+        self.view.tableContextRequested.connect(self._show_table_context_menu)
 
         self.load_menu = LoadMenu(self)
         self.load_menu.raise_()
@@ -86,8 +91,16 @@ class MainWindow(QMainWindow):
         self._zone_viewer_user_pos: QPoint | None = None
         self.zone_viewer.hide()
         spinner_icon = BASE_DIR / "resources" / "brass-eye.svg"
-        self.loading_spinner = LoadingSpinner(spinner_icon, self)
-        self.loading_spinner.hide()
+        self.loading_spinner = self._create_spinner(spinner_icon)
+        self.search_loading_spinner = self._create_spinner(spinner_icon)
+        self.deck_loader = DeckLoader()
+        self.scryfall_search_menu = ScryfallSearchMenu(
+            self,
+            on_submit=self._handle_scryfall_search,
+            on_result_click=self._handle_scryfall_result_click,
+        )
+        self.card_context_menu = CardContextMenu(self)
+        self.table_context_menu = TableContextMenu(self, search_menu=self.scryfall_search_menu)
         self.undo.indexChanged.connect(self._refresh_deck_view)
         self.undo.indexChanged.connect(self._refresh_zone_viewer)
 
@@ -214,8 +227,10 @@ class MainWindow(QMainWindow):
         self._sync_scene_rect_to_viewport()
         self._position_load_menu()
         self._position_loading_spinner()
+        self._position_search_loading_spinner()
         self._position_deck_view()
         self._position_zone_viewer()
+        self._hide_context_menus()
 
     def _sync_scene_rect_to_viewport(self):
         view_src = self.view.mapToScene(self.view.viewport().rect()).boundingRect()
@@ -263,6 +278,44 @@ class MainWindow(QMainWindow):
         if self.loading_spinner.isVisible():
             self.loading_spinner.raise_()
 
+    def _create_spinner(self, icon_path):
+        spinner = LoadingSpinner(icon_path, self)
+        spinner.hide()
+        return spinner
+
+    def _position_search_loading_spinner(self):
+        spinner = getattr(self, "search_loading_spinner", None)
+        if spinner is None:
+            return
+        size = spinner.size()
+        if size.isEmpty():
+            return
+        menu = getattr(self, "scryfall_search_menu", None)
+        if menu is not None:
+            input_widget = getattr(menu, "_search_input", None)
+            if input_widget is not None:
+                input_rect = input_widget.geometry()
+                input_top_left = menu.mapToGlobal(input_rect.topLeft())
+                target_x = input_top_left.x() + input_rect.width() // 2 - size.width() // 2
+                target_y = input_top_left.y() - size.height() - 12
+                top_left = QPoint(max(0, target_x), max(0, target_y))
+            else:
+                rect = menu.geometry()
+                center = rect.center()
+                top_left = QPoint(
+                    max(0, center.x() - size.width() // 2),
+                    max(0, center.y() - size.height() // 2),
+                )
+        else:
+            center = self.rect().center()
+            top_left = QPoint(
+                max(0, center.x() - size.width() // 2),
+                max(0, center.y() - size.height() // 2),
+            )
+        spinner.move(top_left)
+        if spinner.isVisible():
+            spinner.raise_()
+
     def _position_deck_view(self):
         if not hasattr(self, "deck_view_widget") or self.deck_view_widget is None:
             return
@@ -303,6 +356,7 @@ class MainWindow(QMainWindow):
         preview.setVisible(True)
         preview.reflow_cards()
         widget.sync_preview_zone_view()
+        self._position_search_loading_spinner()
 
     def _position_zone_viewer(self):
         viewer = getattr(self, "zone_viewer", None)
@@ -495,6 +549,7 @@ class MainWindow(QMainWindow):
         load_menu = getattr(self, "load_menu", None)
         if load_menu is None:
             return
+        self._hide_context_menus()
         load_menu.show_import_menu()
         self._position_load_menu()
 
@@ -621,6 +676,115 @@ class MainWindow(QMainWindow):
         viewer = getattr(self, "zone_viewer", None)
         if proxy and viewer and viewer.isVisible():
             proxy.refresh()
+
+    def _hide_context_menus(self, *, keep_search_spinner: bool = False):
+        if getattr(self, "card_context_menu", None):
+            self.card_context_menu.hide()
+        if getattr(self, "table_context_menu", None):
+            self.table_context_menu.hide()
+        if getattr(self, "scryfall_search_menu", None):
+            self.scryfall_search_menu.hide()
+        if not keep_search_spinner:
+            spinner = getattr(self, "search_loading_spinner", None)
+            if spinner is not None:
+                spinner.finish(immediate=True)
+
+    def _show_card_context_menu(self, card: Card, global_pos):
+        self._hide_context_menus()
+        if getattr(self, "card_context_menu", None):
+            self.card_context_menu.show_for_card(card, global_pos)
+
+    def _show_table_context_menu(self, global_pos, scene_pos):
+        self._hide_context_menus()
+        if getattr(self, "table_context_menu", None):
+            self.table_context_menu.show_for_table(global_pos, scene_pos)
+
+    def _handle_scryfall_search(self, query: str):
+        loader = getattr(self, "deck_loader", None)
+        normalized = (query or "").strip()
+        if not normalized:
+            print("[ScryfallSearch] Ignoring empty query")
+            return
+        if loader is None:
+            print("[ScryfallSearch] DeckLoader unavailable")
+            return
+        self._start_search_spinner()
+        self._launch_scryfall_search_thread(loader, normalized)
+
+    def _start_search_spinner(self):
+        spinner = getattr(self, "search_loading_spinner", None)
+        if spinner is None:
+            return
+        self._position_search_loading_spinner()
+        spinner.start()
+        spinner.raise_()
+
+    def _handle_scryfall_result_click(self, payload: dict):
+        # payload: {"card": card_dict, "set": set_code, "collector_number": collector}
+        self._hide_context_menus(keep_search_spinner=True)
+        set_code = (payload.get("set") or "").strip().upper() if isinstance(payload, dict) else ""
+        collector = (payload.get("collector_number") or "").strip() if isinstance(payload, dict) else ""
+        card_name = ""
+        if isinstance(payload, dict):
+            card_obj = payload.get("card") or {}
+            if isinstance(card_obj, dict):
+                card_name = card_obj.get("name") or ""
+        if not set_code or not collector:
+            print("[ScryfallSearch] Missing set_code or collector_number; cannot spawn.")
+            if getattr(self, "search_loading_spinner", None):
+                self.search_loading_spinner.finish(immediate=True)
+            return
+        spinner = getattr(self, "search_loading_spinner", None)
+        if spinner is not None:
+            self._position_search_loading_spinner()
+            spinner.start()
+            spinner.raise_()
+        try:
+            card = self.spawner.spawn_card(set_code, collector)
+            self._layout_cards_on_table([card])
+            print(f"[ScryfallSearch] Spawned card {set_code}/{collector} {card_name}")
+        except Exception as exc:
+            print(f"[ScryfallSearch] Failed to spawn card {set_code}/{collector}: {exc}")
+        finally:
+            if spinner is not None:
+                spinner.finish()
+    def _launch_scryfall_search_thread(self, loader, query: str):
+        # Cancel any previous search thread
+        prev_thread = getattr(self, "_search_thread", None)
+        if prev_thread and prev_thread.isRunning():
+            prev_thread.requestInterruption()
+
+        worker = _ScryfallSearchWorker(loader, query)
+        thread = QThread(self)
+        worker.moveToThread(thread)
+
+        worker.finished.connect(self._on_scryfall_search_success)
+        worker.failed.connect(self._on_scryfall_search_failure)
+        worker.finished.connect(thread.quit)
+        worker.failed.connect(thread.quit)
+        thread.finished.connect(worker.deleteLater)
+        thread.finished.connect(thread.deleteLater)
+
+        self._search_thread = thread
+        thread.started.connect(worker.run)
+        thread.start()
+
+    @Slot(list, str)
+    def _on_scryfall_search_success(self, results: list, query: str):
+        print(f"[ScryfallSearch] Received {len(results)} results for '{query}':")
+        print(results)
+        if getattr(self, "scryfall_search_menu", None):
+            self.scryfall_search_menu.set_results(results)
+        spinner = getattr(self, "search_loading_spinner", None)
+        if spinner is not None:
+            spinner.finish()
+
+    @Slot(str, str)
+    def _on_scryfall_search_failure(self, message: str, query: str):
+        print(f"[ScryfallSearch] Failed search for '{query}': {message}")
+        spinner = getattr(self, "search_loading_spinner", None)
+        if spinner is not None:
+            spinner.finish()
 
     def _hide_deck_view(self):
         if not hasattr(self, "deck_view_widget") or self.deck_view_widget is None:

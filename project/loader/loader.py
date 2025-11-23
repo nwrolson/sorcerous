@@ -430,6 +430,29 @@ class DeckLoader:
             return "archidekt"
         return ""
 
+    # -------------------------------------------------------------- scryfall
+    def search_cards(
+        self,
+        query: str,
+        *,
+        page: int = 1,
+        include_extras: bool = False,
+    ) -> List[dict]:
+        """Perform a Scryfall `/cards/search` query and return the card list."""
+        normalized = (query or "").strip()
+        if not normalized:
+            raise DeckLoaderError("Search query is empty.")
+        params = {
+            "q": normalized,
+            "page": page,
+            "include_extras": str(bool(include_extras)).lower(),
+        }
+        payload = self._http_get_json(f"{SCRYFALL_API}/cards/search", params=params)
+        data = payload.get("data")
+        if not isinstance(data, list):
+            raise DeckLoaderError("Unexpected search response format.")
+        return data
+
     def _http_get_json(self, url: str, params: Optional[dict] = None) -> dict:
         try:
             resp = self._session.get(url, params=params, timeout=self.timeout)
