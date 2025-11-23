@@ -718,6 +718,9 @@ class MainWindow(QMainWindow):
         self._position_search_loading_spinner()
         spinner.start()
         spinner.raise_()
+        # Ensure we don't have a stale worker reference hanging around
+        if getattr(self, "_search_worker", None) is None:
+            self._search_worker = None
 
     def _handle_scryfall_result_click(self, payload: dict):
         # payload: {"card": card_dict, "set": set_code, "collector_number": collector}
@@ -764,8 +767,11 @@ class MainWindow(QMainWindow):
         worker.failed.connect(thread.quit)
         thread.finished.connect(worker.deleteLater)
         thread.finished.connect(thread.deleteLater)
+        thread.finished.connect(lambda: setattr(self, "_search_worker", None))
+        thread.finished.connect(lambda: setattr(self, "_search_thread", None))
 
         self._search_thread = thread
+        self._search_worker = worker
         thread.started.connect(worker.run)
         thread.start()
 
@@ -778,6 +784,9 @@ class MainWindow(QMainWindow):
         spinner = getattr(self, "search_loading_spinner", None)
         if spinner is not None:
             spinner.finish()
+        thread = getattr(self, "_search_thread", None)
+        if thread and thread.isRunning():
+            thread.quit()
 
     @Slot(str, str)
     def _on_scryfall_search_failure(self, message: str, query: str):
@@ -785,6 +794,9 @@ class MainWindow(QMainWindow):
         spinner = getattr(self, "search_loading_spinner", None)
         if spinner is not None:
             spinner.finish()
+        thread = getattr(self, "_search_thread", None)
+        if thread and thread.isRunning():
+            thread.quit()
 
     def _hide_deck_view(self):
         if not hasattr(self, "deck_view_widget") or self.deck_view_widget is None:
