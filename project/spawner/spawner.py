@@ -10,6 +10,7 @@ from PySide6.QtCore import QObject, Signal
 from cache.cache import CacheResult, ImageEntry, ScryfallImageCache
 from card.card import Card
 from loader.loader import DeckLoader, DeckLoaderError
+from .token_descriptor import TokenDescriptor
 
 
 class CardSpawner(QObject):
@@ -134,6 +135,41 @@ class CardSpawner(QObject):
 
         # Keep track of every successful spawn for the remainder of the session.
         self._spawned[result.id] = result
+        return card
+
+    def spawn_token(
+        self,
+        token: TokenDescriptor,
+        *,
+        width: Optional[float] = None,
+        height: Optional[float] = None,
+    ) -> Card:
+        """
+        Build a Card from a local token image without hitting Scryfall.
+        Uses the same defaults as normal spawns.
+        """
+        if token is None or not getattr(token, "image_path", None):
+            raise ValueError("token with image_path is required")
+
+        instance_id = self._allocate_card_id()
+        unique_card_id = f"{token.category}/{token.id}#{instance_id}"
+        card = Card(
+            card_id=unique_card_id,
+            image_path=token.image_path,
+            back_image_path=self._default_back_image_path,
+            thumbnail_path=token.image_path,
+            w=width if width is not None else self._default_width,
+            h=height if height is not None else self._default_height,
+            id=instance_id,
+            card_data={
+                "name": token.name,
+                "token_category": token.category,
+                "token_id": token.id,
+            },
+            print_id=token.id,
+        )
+        card.mark_as_token()
+        self._register_card(card)
         return card
 
     def _prepare_spawn_jobs(

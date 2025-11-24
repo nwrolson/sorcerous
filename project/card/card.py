@@ -48,6 +48,8 @@ class Card(QGraphicsObject):
         self._zone_hidden = False
         self.id = id
         self.card_data = card_data
+        self.is_token: bool = False  # flag for token cards
+        self.token: bool = False     # alias for compatibility
         self._back_image_path = back_image_path
         self._thumbnail_path = thumbnail_path
         self._clamp_to_scene = True
@@ -203,6 +205,18 @@ class Card(QGraphicsObject):
         if self._zone_hidden and not self._hidden_viewports:
             self._update_hidden_visibility()
             self.update()
+
+    def mark_as_token(self):
+        """Tag this card as a token for zone filtering."""
+        self.is_token = True
+        self.token = True
+        try:
+            if isinstance(self.card_data, dict):
+                self.card_data["token"] = True
+            else:
+                self.card_data = {"token": True}
+        except Exception:
+            pass
 
     def set_clamp_to_scene(self, clamp: bool):
         self._clamp_to_scene = bool(clamp)

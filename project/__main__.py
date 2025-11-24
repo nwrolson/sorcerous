@@ -29,8 +29,10 @@ from ui.context_menu import CardContextMenu, TableContextMenu, ScryfallSearchMen
 from loader.loader import DeckLoader, DeckLoaderError
 from _scryfall_search_worker import _ScryfallSearchWorker
 from ui.icon_bar import IconBar
+from ui.token_spawn_menu import TokenSpawnMenu
 from cache.cache import ScryfallImageCache
 from spawner.spawner import CardSpawner
+from spawner.token_descriptor import TokenDescriptor
 
 from pathlib import Path
 
@@ -39,6 +41,8 @@ BASE_DIR = Path(__file__).resolve().parent
 
 # -------- Main Window --------
 class MainWindow(QMainWindow):
+    TOKEN_CATEGORIES = ("common", "deck", "mechanics", "dungeon", "custom")
+
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Sorcerous")
@@ -118,6 +122,7 @@ class MainWindow(QMainWindow):
         QTimer.singleShot(0, self._position_loading_spinner)
         QTimer.singleShot(0, self._position_deck_view)
         QTimer.singleShot(0, self._position_zone_viewer)
+        QTimer.singleShot(0, self._position_token_menu)
 
         # Virtual cam setup
         self.frame_queue: queue.Queue = queue.Queue(maxsize=1)
@@ -147,7 +152,8 @@ class MainWindow(QMainWindow):
         self.zone_viewer.set_available_zones([self.graveyard_zone])
         self.zone_viewer.show_zone(self.graveyard_zone.zone_id)
 
-        cache_root = BASE_DIR / "cards" / "scryfall-cache"
+        # Shared cache root for cards and tokens.
+        cache_root = BASE_DIR / "scryfall-cache"
         self.card_cache = ScryfallImageCache(
             root_dir=str(cache_root),
             memory_items=512,
@@ -163,6 +169,22 @@ class MainWindow(QMainWindow):
             lambda *_: self.loading_spinner.finish()
         )
         self.load_menu.importRequested.connect(self._on_import_requested)
+
+        self.token_menu = TokenSpawnMenu(
+            self.view,
+            self.scene,
+            self.spawner,
+            on_card_created=self._register_card_item,
+            parent=self,
+        )
+        self.token_menu.closeRequested.connect(self._hide_token_menu)
+        self.token_menu.dragMoved.connect(self._on_token_menu_moved)
+        self.token_menu.categoryChanged.connect(self._handle_token_category_changed)
+        self._token_menu_user_pos: QPoint | None = None
+        self.token_menu.hide()
+        for category in self.TOKEN_CATEGORIES:
+            self._refresh_token_category(category)
+        self._position_token_menu()
 
         self._register_existing_cards()
         self._refresh_deck_view()
@@ -238,12 +260,14 @@ class MainWindow(QMainWindow):
         self._position_search_loading_spinner()
         self._position_deck_view()
         self._position_zone_viewer()
+        self._position_token_menu()
         self._position_icon_bar()
         self._hide_context_menus()
 
     def moveEvent(self, ev):
         super().moveEvent(ev)
         self._position_icon_bar()
+        self._position_token_menu()
 
     def _sync_scene_rect_to_viewport(self):
         view_src = self.view.mapToScene(self.view.viewport().rect()).boundingRect()
@@ -431,7 +455,8 @@ class MainWindow(QMainWindow):
                 self._toggle_deck_view()
             case "graveyard":
                 self._toggle_zone_viewer()
-            
+            case "tokens":
+                self._toggle_token_menu()
 
     def _position_zone_viewer(self):
         viewer = getattr(self, "zone_viewer", None)
@@ -451,6 +476,24 @@ class MainWindow(QMainWindow):
         if viewer.isVisible():
             viewer.raise_()
 
+    def _position_token_menu(self):
+        menu = getattr(self, "token_menu", None)
+        if menu is None:
+            return
+        menu.resize_for_window(self.size())
+        size = menu.size()
+        user_pos = getattr(self, "_token_menu_user_pos", None)
+        if user_pos is None:
+            top_left = QPoint(
+                max(0, 24),
+                max(0, self.height() // 6),
+            )
+        else:
+            top_left = self._clamp_point_to_window(user_pos, size)
+        menu.move(top_left)
+        if menu.isVisible():
+            menu.raise_()
+
     def _clamp_point_to_window(self, pos: QPoint, size) -> QPoint:
         max_x = max(0, self.width() - size.width())
         max_y = max(0, self.height() - size.height())
@@ -458,6 +501,31 @@ class MainWindow(QMainWindow):
         clamped_y = max(0, min(pos.y(), max_y))
         return QPoint(clamped_x, clamped_y)
     
+    def _hide_token_menu(self):
+        menu = getattr(self, "token_menu", None)
+        if menu is None:
+            return
+        menu.hide()
+
+    def _on_token_menu_moved(self, pos: QPoint):
+        self._token_menu_user_pos = QPoint(pos)
+
+    def _handle_token_category_changed(self, category: str):
+        if not category:
+            return
+        self._refresh_token_category(category)
+
+    def _refresh_token_category(self, category: str):
+        menu = getattr(self, "token_menu", None)
+        cache = getattr(self, "card_cache", None)
+        if menu is None or cache is None:
+            return
+        if category == "deck":
+            tokens: list[TokenDescriptor] = []
+        else:
+            tokens = cache.list_tokens(category)
+        menu.set_tokens_for_category(category, tokens)
+
 
     def _refresh_deck_view(self, *_):
         if not hasattr(self, "deck_view_widget") or self.deck_view_widget is None:
@@ -619,6 +687,20 @@ class MainWindow(QMainWindow):
         self._position_zone_viewer()
         viewer.show()
         viewer.raise_()
+
+    def _toggle_token_menu(self):
+        menu = getattr(self, "token_menu", None)
+        if menu is None:
+            return
+        if menu.isVisible():
+            self._hide_token_menu()
+            return
+        # Refresh the current category from disk before showing.
+        current_category = menu.current_category() or self.TOKEN_CATEGORIES[0]
+        self._refresh_token_category(current_category)
+        self._position_token_menu()
+        menu.show()
+        menu.raise_()
 
     def _toggle_icon_bar(self):
         bar = getattr(self, "icon_bar", None)
@@ -1203,21 +1285,29 @@ class MainWindow(QMainWindow):
         if zone is None:
             return False
 
+        tokens_to_table: list[Card] = []
+        inserted_any = False
         for card in cards:
+            if zone.zone_id == "library" and getattr(card, "is_token", False):
+                tokens_to_table.append(card)
+                continue
             # Add to scene so zone can take ownership and hide/reflow as needed.
             self.scene.add_card(card, zone.pos())
             self._register_card_item(card)
             insert_at = len(zone.cards)
             zone.insert_card(insert_at, card)
             self.scene.model.containers[card.card_id] = zone.zone_id
+            inserted_any = True
 
         zone_order = [c.card_id for c in zone.cards]
         self.scene.model.zones[zone.zone_id]["order"] = zone_order
         for card in zone.cards:
             self.scene.model.cards[card.card_id]["pos"] = card.pos()
+        if tokens_to_table:
+            self._layout_cards_on_table(tokens_to_table)
         if zone.zone_id == "library":
             self._refresh_deck_view()
-        return True
+        return inserted_any or bool(tokens_to_table)
 
     def _layout_cards_on_table(self, cards: list[Card]) -> None:
         if not cards:

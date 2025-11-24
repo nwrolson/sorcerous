@@ -57,3 +57,10 @@ class LibraryZone(Zone):
         for card in self.cards[:index]:
             y += card.boundingRect().height() + self.card_gap
         return self.mapToScene(QPointF(self.padding, y))
+
+    def insert_card(self, index: int, card):
+        """Prevent tokens from entering the library; otherwise use default behavior."""
+        if getattr(card, "is_token", False):
+            print(f"[LibraryZone] Ignoring token card '{getattr(card, 'card_id', '')}'")
+            return
+        super().insert_card(index, card)

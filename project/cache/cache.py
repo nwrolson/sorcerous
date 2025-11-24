@@ -12,6 +12,7 @@ import json
 import requests
 from PySide6.QtCore import QBuffer, QByteArray, QIODevice
 from PySide6.QtGui import QImage
+from spawner.token_descriptor import TokenDescriptor
 
 
 @dataclass(frozen=True)
@@ -122,6 +123,14 @@ class ScryfallImageCache:
 
     def _thumbnail_path(self, base: str) -> str:
         return os.path.join(base, "thumbnail.png")
+
+    def _tokens_root(self) -> str:
+        return os.path.join(self.root, "tokens")
+
+    @staticmethod
+    def _is_image_file(name: str) -> bool:
+        ext = os.path.splitext(name)[1].lower()
+        return ext in {".png", ".jpg", ".jpeg", ".bmp", ".gif", ".webp"}
 
     def _read_disk(self, set_code: str, collector_number: str) -> List[ImageEntry]:
         base, candidates = self._disk_paths(set_code, collector_number)
@@ -370,3 +379,33 @@ class ScryfallImageCache:
         if not result.ok:
             return None
         return self._maybe_cache_thumbnail(base, result.data or self._read_card_data(base))
+
+    def list_tokens(self, category: str) -> list[TokenDescriptor]:
+        """
+        Discover token images under {root}/tokens/{category}.
+        Filenames (sans extension) become id/name; loose images only.
+        """
+        tokens_dir = os.path.join(self._tokens_root(), category)
+        if not os.path.isdir(tokens_dir):
+            return []
+
+        descriptors: list[TokenDescriptor] = []
+        try:
+            with os.scandir(tokens_dir) as it:
+                for entry in it:
+                    if not entry.is_file():
+                        continue
+                    if not self._is_image_file(entry.name):
+                        continue
+                    token_id, _ = os.path.splitext(entry.name)
+                    descriptors.append(
+                        TokenDescriptor(
+                            id=token_id,
+                            name=token_id,
+                            category=category,
+                            image_path=os.path.abspath(entry.path),
+                        )
+                    )
+        except OSError:
+            return []
+        return descriptors
