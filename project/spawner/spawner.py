@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import copy
 import threading
 from pathlib import Path
 from types import MappingProxyType
 from typing import Callable, Dict, Mapping, Optional
 
 from PySide6.QtCore import QObject, Signal
+from PySide6.QtGui import QColor
 
 from cache.cache import CacheResult, ImageEntry, ScryfallImageCache
 from card.card import Card
@@ -314,6 +316,61 @@ class CardSpawner(QObject):
         removed = self.unregister_card(card_id)
         if not removed:
             self._report_progress(f"destroy_card({card_id}) ignored; id not tracked.")
+
+    def duplicate_card(self, original: Card) -> Card:
+        """
+        Build a new Card that mirrors `original`, assigning only a fresh numeric id
+        and derived card_id. Copies pixmap/back/thumbnail, sizing, face-down and tap
+        states, token flags, and card_data.
+        """
+        if original is None:
+            raise ValueError("original Card is required to duplicate")
+
+        instance_id = self._allocate_card_id()
+        base_id = getattr(original, "card_id", "card")
+        prefix = base_id.split("#", 1)[0] if isinstance(base_id, str) else str(base_id)
+        unique_card_id = f"{prefix}#{instance_id}"
+
+        card_data = copy.deepcopy(getattr(original, "card_data", None))
+        width = getattr(original, "w", self._default_width)
+        height = getattr(original, "h", self._default_height)
+        back_image = getattr(original, "_back_image_path", None) or self._default_back_image_path
+        thumbnail_path = getattr(original, "thumbnail_path", None)
+
+        color = getattr(original, "color", None)
+        color_copy = QColor(color) if isinstance(color, QColor) else QColor(240, 240, 240)
+
+        duplicate = Card(
+            card_id=unique_card_id,
+            image_path=None,  # pixmap copied below
+            back_image_path=back_image,
+            thumbnail_path=thumbnail_path,
+            w=width,
+            h=height,
+            color=color_copy,
+            face_down=getattr(original, "face_down", False),
+            id=instance_id,
+            card_data=card_data,
+            print_id=getattr(original, "print_id", prefix),
+        )
+
+        # Carry over already-loaded pixmaps to avoid re-reading from disk.
+        if getattr(original, "pixmap", None) is not None:
+            duplicate.pixmap = original.pixmap
+        thumb_pixmap = getattr(original, "thumbnail", None)
+        if thumb_pixmap is not None:
+            duplicate._thumbnail = thumb_pixmap
+
+        duplicate.set_clamp_to_scene(getattr(original, "_clamp_to_scene", True))
+        if getattr(original, "_zone_hidden", False):
+            duplicate.set_zone_hidden(True)
+        if getattr(original, "is_token", False):
+            duplicate.mark_as_token()
+        if getattr(original, "is_tapped", None) and original.is_tapped():
+            duplicate.set_tapped(True)
+
+        self._register_card(duplicate)
+        return duplicate
 
     @staticmethod
     def _pick_image(

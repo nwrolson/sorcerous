@@ -207,7 +207,7 @@ class TokenSpawnMenu(QWidget):
         ("deck", "Deck"),
         ("mechanics", "Mechanics"),
         ("dungeon", "Dungeon"),
-        ("custom", "Custom"),
+        ("creatures", "Creatures"),
     ]
 
     def __init__(self, board_view, board_scene, spawner, *, on_card_created=None, parent=None):
@@ -265,7 +265,7 @@ class TokenSpawnMenu(QWidget):
         header_layout.setContentsMargins(0, 0, 0, 0)
         header_layout.setSpacing(8)
 
-        self.title_label = QLabel("Token Spawner", header)
+        self.title_label = QLabel("Treasure Chest", header)
         self.close_button = QPushButton("X", header)
         self.close_button.setFixedSize(24, 24)
         self.close_button.setCursor(Qt.PointingHandCursor)

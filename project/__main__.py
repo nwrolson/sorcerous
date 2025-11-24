@@ -66,6 +66,7 @@ class MainWindow(QMainWindow):
         # Keyboard Shortcuts
         self.view.register_shortcut(Qt.Key_T, lambda ev: self._handle_tap_shortcut())
         self.view.register_shortcut(Qt.Key_Q, lambda ev: self._handle_stack_shortcut(ev))
+        self.view.register_shortcut(Qt.Key_Z, lambda ev: self._handle_duplicate_shortcut())
         self.view.register_shortcut(Qt.Key_D, lambda ev: self._handle_draw_shortcut())
         self.view.register_shortcut(Qt.Key_S, lambda ev: self._handle_shuffle_shortcut())
         self.view.register_shortcut(
@@ -1096,6 +1097,48 @@ class MainWindow(QMainWindow):
         for card in table_cards:
             card.set_tapped(new_state)
         self._on_card_action()
+
+    def _handle_duplicate_shortcut(self, ev=None):
+        scene = getattr(self, "scene", None)
+        spawner = getattr(self, "spawner", None)
+        if scene is None or spawner is None:
+            return
+
+        selected_cards = [
+            it for it in scene.selectedItems()
+            if isinstance(it, Card)
+        ]
+        hover_card = getattr(scene, "hover_card", None)
+        if hover_card and hover_card not in selected_cards:
+            selected_cards.append(hover_card)
+        if not selected_cards:
+            return
+
+        table_cards = [
+            card for card in selected_cards
+            if scene.model.containers.get(card.card_id, "table") == "table"
+        ]
+        if not table_cards:
+            return
+
+        duplicates: list[Card] = []
+        for card in table_cards:
+            try:
+                duplicate = spawner.duplicate_card(card)
+            except Exception as exc:
+                print(f"[MainWindow] Failed to duplicate card {getattr(card, 'card_id', '?')}: {exc}")
+                continue
+            card_rect = card.boundingRect()
+            spread = QPointF(card_rect.width() * 0.2, card_rect.height() * 0.15)
+            pos = QPointF(card.pos()) + spread
+            self.scene.add_card(duplicate, pos)
+            duplicate.setZValue(card.zValue() + 1.0)
+            self._register_card_item(duplicate)
+            duplicates.append(duplicate)
+
+        if duplicates:
+            self._clear_stack_anchor()
+            self._on_card_action()
 
     def _handle_stack_shortcut(self, ev=None):
         selected_cards = [
