@@ -6,7 +6,7 @@ import time
 import statistics
 from weakref import WeakSet
 
-from PySide6.QtCore import Qt, QPointF, QTimer, QRectF, QPoint, Slot, QThread
+from PySide6.QtCore import Qt, QPointF, QTimer, QRectF, QPoint, Slot, QThread, QEvent
 from PySide6.QtGui import QImage, QUndoStack, QPainter, QCursor
 from PySide6.QtWidgets import QApplication, QMainWindow, QFrame, QGraphicsView
 
@@ -28,6 +28,7 @@ from ui.loading_spinner import LoadingSpinner
 from ui.context_menu import CardContextMenu, TableContextMenu, ScryfallSearchMenu
 from loader.loader import DeckLoader, DeckLoaderError
 from _scryfall_search_worker import _ScryfallSearchWorker
+from ui.icon_bar import IconBar
 from cache.cache import ScryfallImageCache
 from spawner.spawner import CardSpawner
 
@@ -73,6 +74,7 @@ class MainWindow(QMainWindow):
         self.view.register_shortcut(Qt.Key_G, lambda ev: self._handle_graveyard_shortcut())
         self.view.register_shortcut(Qt.Key_X, self._handle_delete_shortcut)
         self.view.register_shortcut(Qt.Key_Escape, self._handle_escape_shortcut)
+        self.view.register_shortcut(Qt.Key_M, lambda ev: self._toggle_icon_bar())
         self.view.cardContextRequested.connect(self._show_card_context_menu)
         self.view.tableContextRequested.connect(self._show_table_context_menu)
 
@@ -99,10 +101,16 @@ class MainWindow(QMainWindow):
             on_submit=self._handle_scryfall_search,
             on_result_click=self._handle_scryfall_result_click,
         )
+        self.icon_bar = IconBar(self, icon_size=100)
         self.card_context_menu = CardContextMenu(self)
         self.table_context_menu = TableContextMenu(self, search_menu=self.scryfall_search_menu)
         self.undo.indexChanged.connect(self._refresh_deck_view)
         self.undo.indexChanged.connect(self._refresh_zone_viewer)
+        self.installEventFilter(self)
+        app = QApplication.instance()
+        if app:
+            app.installEventFilter(self)
+        self._configure_icon_bar()
 
         # Freeze window size after initial layout
         QTimer.singleShot(0, self._sync_scene_rect_to_viewport)
@@ -139,7 +147,7 @@ class MainWindow(QMainWindow):
         self.zone_viewer.set_available_zones([self.graveyard_zone])
         self.zone_viewer.show_zone(self.graveyard_zone.zone_id)
 
-        cache_root = BASE_DIR / "scryfall-cache"
+        cache_root = BASE_DIR / "cards" / "scryfall-cache"
         self.card_cache = ScryfallImageCache(
             root_dir=str(cache_root),
             memory_items=512,
@@ -230,7 +238,12 @@ class MainWindow(QMainWindow):
         self._position_search_loading_spinner()
         self._position_deck_view()
         self._position_zone_viewer()
+        self._position_icon_bar()
         self._hide_context_menus()
+
+    def moveEvent(self, ev):
+        super().moveEvent(ev)
+        self._position_icon_bar()
 
     def _sync_scene_rect_to_viewport(self):
         view_src = self.view.mapToScene(self.view.viewport().rect()).boundingRect()
@@ -357,6 +370,68 @@ class MainWindow(QMainWindow):
         preview.reflow_cards()
         widget.sync_preview_zone_view()
         self._position_search_loading_spinner()
+        self._position_icon_bar()
+
+    def _position_icon_bar(self):
+        bar = getattr(self, "icon_bar", None)
+        if bar is None:
+            return
+        size = bar.size()
+        if size.isEmpty():
+            bar.adjustSize()
+            size = bar.size()
+        margin = 16
+        top_offset = 48
+        x = max(0, self.width() - size.width() - margin)
+        y = max(0, top_offset)
+        bar.move(x, y)
+        if bar.isVisible():
+            bar.raise_()
+
+    def _configure_icon_bar(self):
+        bar = getattr(self, "icon_bar", None)
+        if bar is None:
+            return
+        base = Path(__file__).resolve().parent / "resources" / "icons"
+        actions = [
+            {
+                "id": "library",
+                "icon": base / "library.svg",
+                "tooltip": "Library",
+                "name": "Library",
+            },
+            {
+                "id": "graveyard",
+                "icon": base / "graveyard.svg",
+                "tooltip": "Graveyard",
+                "name": "Graveyard",
+            },
+            {
+                "id": "search",
+                "icon": base / "search.svg",
+                "tooltip": "Search",
+                "name": "Search",
+            },            {
+                "id": "tokens",
+                "icon": base / "tokens.svg",
+                "tooltip": "Tokens",
+                "name": "Tokens",
+            },
+        ]
+        bar.set_actions(actions)
+        bar.buttonClicked.connect(self._handle_icon_bar_click)
+        bar.show()
+        bar.raise_()
+        self._position_icon_bar()
+
+    def _handle_icon_bar_click(self, key: str):
+        print(f"[IconBar] Button clicked: {key}")
+        match key:
+            case "library":
+                self._toggle_deck_view()
+            case "graveyard":
+                self._toggle_zone_viewer()
+            
 
     def _position_zone_viewer(self):
         viewer = getattr(self, "zone_viewer", None)
@@ -545,13 +620,27 @@ class MainWindow(QMainWindow):
         viewer.show()
         viewer.raise_()
 
+    def _toggle_icon_bar(self):
+        bar = getattr(self, "icon_bar", None)
+        if bar is None:
+            return
+        if bar.isVisible():
+            bar.hide()
+        else:
+            self._position_icon_bar()
+            bar.show()
+            bar.raise_()
+
     def _handle_escape_shortcut(self, ev=None):
         load_menu = getattr(self, "load_menu", None)
         if load_menu is None:
             return
         self._hide_context_menus()
-        load_menu.show_import_menu()
+        if load_menu.isVisible():
+            load_menu.hide()
+            return
         self._position_load_menu()
+        load_menu.show_import_menu()
 
     def _handle_delete_shortcut(self, ev=None):
         scene = getattr(self, "scene", None)
@@ -751,6 +840,24 @@ class MainWindow(QMainWindow):
         finally:
             if spinner is not None:
                 spinner.finish()
+
+    def eventFilter(self, obj, event):
+        if event.type() == QEvent.MouseButtonPress:
+            load_menu = getattr(self, "load_menu", None)
+            if load_menu and load_menu.isVisible():
+                global_pos = None
+                if hasattr(event, "globalPosition"):
+                    try:
+                        global_pos = event.globalPosition().toPoint()
+                    except Exception:
+                        global_pos = None
+                if global_pos is None and hasattr(event, "globalPos"):
+                    global_pos = event.globalPos()
+                if global_pos is not None:
+                    local_pos = load_menu.mapFromGlobal(global_pos)
+                    if not load_menu.rect().contains(local_pos):
+                        load_menu.hide()
+        return super().eventFilter(obj, event)
     def _launch_scryfall_search_thread(self, loader, query: str):
         # Cancel any previous search thread
         prev_thread = getattr(self, "_search_thread", None)
