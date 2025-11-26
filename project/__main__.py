@@ -107,7 +107,6 @@ class MainWindow(QMainWindow):
             on_result_click=self._handle_scryfall_result_click,
         )
         self.icon_bar = IconBar(self, icon_size=100)
-        self.card_context_menu = CardContextMenu(self)
         self.table_context_menu = TableContextMenu(self, search_menu=self.scryfall_search_menu)
         self.undo.indexChanged.connect(self._refresh_deck_view)
         self.undo.indexChanged.connect(self._refresh_zone_viewer)
@@ -170,6 +169,13 @@ class MainWindow(QMainWindow):
             lambda *_: self.loading_spinner.finish()
         )
         self.load_menu.importRequested.connect(self._on_import_requested)
+        self.card_context_menu = CardContextMenu(
+            self,
+            cache=self.card_cache,
+            spawner=self.spawner,
+            board_scene=self.scene,
+            board_view=self.view,
+        )
 
         self.token_menu = TokenSpawnMenu(
             self.view,

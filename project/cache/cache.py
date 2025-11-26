@@ -110,7 +110,7 @@ class ScryfallImageCache:
         return f"{set_code.upper()}/{collector_number}"
 
     def _disk_paths(self, set_code: str, collector_number: str) -> Tuple[str, Dict[str, str]]:
-        base = os.path.join(self.root, set_code.upper(), collector_number)
+        base = os.path.join(self._cards_root(), set_code.upper(), collector_number)
         # Map of face->path. We will discover which exist.
         candidates = {
             "front": os.path.join(base, "front.png"),
@@ -127,6 +127,20 @@ class ScryfallImageCache:
     def _tokens_root(self) -> str:
         return os.path.join(self.root, "tokens")
 
+    def _cards_root(self) -> str:
+        """
+        Ensure cards are stored under a dedicated /cards subdirectory.
+        If the provided root already ends with 'cards', use it directly.
+        """
+        base = self.root
+        if os.path.basename(base.rstrip(os.sep)) != "cards":
+            base = os.path.join(base, "cards")
+        os.makedirs(base, exist_ok=True)
+        return base
+
+    def _tokens_cache_root(self) -> str:
+        return os.path.join(self._tokens_root(), "cache")
+
     @staticmethod
     def _is_image_file(name: str) -> bool:
         ext = os.path.splitext(name)[1].lower()
@@ -139,6 +153,32 @@ class ScryfallImageCache:
             if os.path.exists(path):
                 entries.append(ImageEntry(face=face, path=path))
         return entries
+
+    def _token_cache_paths(self, set_code: Optional[str], collector_number: Optional[str], card_id: str) -> Tuple[str, str, Dict[str, str]]:
+        """
+        Determine token cache id and paths.
+        Preferred key: {SET}/{collector_number}; fallback: {card_id}.
+        """
+        if set_code and collector_number:
+            key = f"{str(set_code).upper()}/{collector_number}"
+        else:
+            key = card_id
+        base = os.path.join(self._tokens_cache_root(), key)
+        candidates = {
+            "front": os.path.join(base, "front.png"),
+            "back": os.path.join(base, "back.png"),
+        }
+        for i in range(6):
+            candidates[f"face{i}"] = os.path.join(base, f"face{i}.png")
+        return key, base, candidates
+
+    def _read_token_disk(self, set_code: Optional[str], collector_number: Optional[str], card_id: str) -> Tuple[str, str, List[ImageEntry]]:
+        cache_id, base, candidates = self._token_cache_paths(set_code, collector_number, card_id)
+        entries: List[ImageEntry] = []
+        for face, path in candidates.items():
+            if os.path.exists(path):
+                entries.append(ImageEntry(face=face, path=path))
+        return cache_id, base, entries
 
     def _write_file(self, path: str, content: bytes) -> None:
         with self._disk_lock:
@@ -285,6 +325,34 @@ class ScryfallImageCache:
         set_code, collector_number = cache_id.split("/", 1)
         return set_code, collector_number
 
+    @staticmethod
+    def _discover_faces(card: dict) -> List[Tuple[str, str]]:
+        """Return list of (face_label, png_url) for the given card JSON."""
+        pngs: List[Tuple[str, str]] = []
+        if not isinstance(card, dict):
+            return pngs
+        try:
+            if "card_faces" in card and isinstance(card["card_faces"], list) and card["card_faces"]:
+                for idx, face in enumerate(card["card_faces"]):
+                    face_label = "front" if idx == 0 else ("back" if idx == 1 else f"face{idx}")
+                    uri = (face.get("image_uris") or {}).get("png") if isinstance(face, dict) else None
+                    if not uri:
+                        card_id = card.get("id", "")
+                        if face_label == "back":
+                            uri = f"{ScryfallImageCache.API_BASE}/cards/{card_id}?format=image&version=png&face=back"
+                        else:
+                            uri = f"{ScryfallImageCache.API_BASE}/cards/{card_id}?format=image&version=png"
+                    pngs.append((face_label, uri))
+            else:
+                uri = (card.get("image_uris") or {}).get("png")
+                if not uri:
+                    card_id = card.get("id", "")
+                    uri = f"{ScryfallImageCache.API_BASE}/cards/{card_id}?format=image&version=png"
+                pngs.append(("front", uri))
+        except Exception:
+            return []
+        return pngs
+
     def get_images(self, set_code: str, collector_number: str) -> CacheResult:
         cid = self._key(set_code, collector_number)
         base, _ = self._disk_paths(set_code, collector_number)
@@ -314,37 +382,34 @@ class ScryfallImageCache:
         if err:
             return CacheResult(ok=False, id=cid, images=[], from_cache=False, error=err, detail=detail)
 
+        # Cache related tokens (if any) and embed references.
+        linked_tokens = self._cache_related_tokens(card)
+        if linked_tokens:
+            try:
+                card["linked_tokens"] = linked_tokens
+            except Exception:
+                pass
+
         # Choose PNG URLs
-        pngs: List[Tuple[str, str]] = []  # (face, url)
-        try:
-            if "card_faces" in card and isinstance(card["card_faces"], list) and card["card_faces"]:
-                for idx, face in enumerate(card["card_faces"]):
-                    face_label = "front" if idx == 0 else ("back" if idx == 1 else f"face{idx}")
-                    uri = (face.get("image_uris") or {}).get("png")
-                    if not uri:
-                        # Fallback using format=image with face parameter for back if needed
-                        # Requires the card id
-                        card_id = card["id"]
-                        if face_label == "back":
-                            uri = f"{self.API_BASE}/cards/{card_id}?format=image&version=png&face=back"
-                        else:
-                            uri = f"{self.API_BASE}/cards/{card_id}?format=image&version=png"
-                    pngs.append((face_label, uri))
-            else:
-                # Single-face
-                uri = (card.get("image_uris") or {}).get("png")
-                if not uri:
-                    card_id = card["id"]
-                    uri = f"{self.API_BASE}/cards/{card_id}?format=image&version=png"
-                pngs.append(("front", uri))
-        except Exception as e:
-            return CacheResult(ok=False, id=cid, images=[], from_cache=False,
-                               error="unusable_image", detail=f"image discovery failed: {e}")
+        pngs = self._discover_faces(card)
+        if not pngs:
+            return CacheResult(
+                ok=False,
+                id=cid,
+                images=[],
+                from_cache=False,
+                error="unusable_image",
+                detail="image discovery failed",
+            )
 
         # 4) Download and store
-        if card_json_text is not None:
+        if card is not None:
             data_path = os.path.join(base, "data.txt")
-            self._write_file(data_path, card_json_text.encode("utf-8"))
+            try:
+                payload = json.dumps(card)
+                self._write_file(data_path, payload.encode("utf-8"))
+            except Exception:
+                pass
         results: List[ImageEntry] = []
         for face, uri in pngs:
             data, dl_err = self._download_png(uri)
@@ -379,6 +444,153 @@ class ScryfallImageCache:
         if not result.ok:
             return None
         return self._maybe_cache_thumbnail(base, result.data or self._read_card_data(base))
+
+    def get_token_images_by_cache_id(self, cache_id: str) -> CacheResult:
+        """
+        Resolve a token cache id ("tokens/cache/<...>") to images, fetching from Scryfall if missing.
+        cache_id may be "tokens/cache/<SET>/<number>" or "tokens/cache/<id>".
+        """
+        token_id = cache_id
+        if token_id.startswith("tokens/cache/"):
+            token_id = token_id[len("tokens/cache/") :]
+        set_code: Optional[str] = None
+        collector_number: Optional[str] = None
+        if "/" in token_id:
+            set_code, collector_number = token_id.split("/", 1)
+
+        cache_key, base, disk_entries = self._read_token_disk(set_code, collector_number, token_id)
+        if disk_entries:
+            data = self._read_card_data(base)
+            self._maybe_cache_thumbnail(base, data)
+            self.mem.put(f"tokens/cache/{cache_key}", disk_entries)
+            return CacheResult(
+                ok=True,
+                id=f"tokens/cache/{cache_key}",
+                images=disk_entries,
+                from_cache=True,
+                data=data,
+            )
+
+        # Try memory (tokens share the same LRU but distinct keys)
+        mem_hit = self.mem.get(f"tokens/cache/{cache_key}")
+        if mem_hit:
+            return CacheResult(
+                ok=True,
+                id=f"tokens/cache/{cache_key}",
+                images=mem_hit,
+                from_cache=True,
+                data=self._read_card_data(base),
+            )
+
+        # Fetch from Scryfall using either set/number or card id
+        if set_code and collector_number:
+            url = f"{self.API_BASE}/cards/{set_code.lower()}/{collector_number}"
+        else:
+            url = f"{self.API_BASE}/cards/{token_id}"
+        token_json, token_json_text, err, detail = self._get_json(url)
+        if err or not token_json:
+            return CacheResult(
+                ok=False,
+                id=f"tokens/cache/{cache_key}",
+                images=[],
+                from_cache=False,
+                error=err or "unusable_image",
+                detail=detail,
+            )
+
+        pngs = self._discover_faces(token_json)
+        if not pngs:
+            return CacheResult(
+                ok=False,
+                id=f"tokens/cache/{cache_key}",
+                images=[],
+                from_cache=False,
+                error="unusable_image",
+                detail="image discovery failed",
+            )
+
+        if token_json_text is not None:
+            data_path = os.path.join(base, "data.txt")
+            try:
+                self._write_file(data_path, token_json_text.encode("utf-8"))
+            except Exception:
+                pass
+
+        results: List[ImageEntry] = []
+        for face, uri in pngs:
+            data, dl_err = self._download_png(uri)
+            if dl_err or data is None:
+                return CacheResult(
+                    ok=False,
+                    id=f"tokens/cache/{cache_key}",
+                    images=[],
+                    from_cache=False,
+                    error=dl_err or "unusable_image",
+                    detail=f"failed face={face}",
+                )
+            path = os.path.join(base, f"{face}.png")
+            self._write_file(path, data)
+            results.append(ImageEntry(face=face, path=path))
+
+        self._maybe_cache_thumbnail(base, token_json)
+        self.mem.put(f"tokens/cache/{cache_key}", results)
+        return CacheResult(
+            ok=True,
+            id=f"tokens/cache/{cache_key}",
+            images=results,
+            from_cache=False,
+            data=token_json,
+        )
+
+    def _cache_related_tokens(self, card: Optional[dict]) -> List[str]:
+        """
+        Discover related token cards in all_parts, download and cache their images,
+        and return a list of token cache ids ("tokens/cache/<...>").
+        """
+        if not isinstance(card, dict):
+            return []
+        parts = card.get("all_parts")
+        if not isinstance(parts, list):
+            return []
+
+        linked: list[str] = []
+        for part in parts:
+            if not isinstance(part, dict):
+                continue
+            if part.get("component") != "token":
+                continue
+            uri = part.get("uri")
+            if not uri:
+                continue
+            token_json, token_json_text, err, detail = self._get_json(uri)
+            if err or not token_json:
+                continue
+            token_id = token_json.get("id") or ""
+            set_code = token_json.get("set")
+            collector_number = token_json.get("collector_number")
+            cache_id, base, existing = self._read_token_disk(set_code, collector_number, token_id)
+            if not existing:
+                pngs = self._discover_faces(token_json)
+                if not pngs:
+                    continue
+                if token_json_text is not None:
+                    data_path = os.path.join(base, "data.txt")
+                    try:
+                        self._write_file(data_path, token_json_text.encode("utf-8"))
+                    except Exception:
+                        pass
+                for face, face_uri in pngs:
+                    data, dl_err = self._download_png(face_uri)
+                    if dl_err or data is None:
+                        existing = []
+                        break
+                    path = os.path.join(base, f"{face}.png")
+                    self._write_file(path, data)
+                    existing.append(ImageEntry(face=face, path=path))
+                self._maybe_cache_thumbnail(base, token_json)
+            if existing:
+                linked.append(f"tokens/cache/{cache_id}")
+        return linked
 
     def list_tokens(self, category: str) -> list[TokenDescriptor]:
         """
