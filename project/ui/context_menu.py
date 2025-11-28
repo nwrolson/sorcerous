@@ -160,13 +160,14 @@ class CardContextMenu(BaseContextMenu):
         self.add_action(
             "tokens",
             "Tokens",
-            handler=self._handle_tokens_clicked,
+            handler=None,
             visible_if=lambda card: bool(self._linked_tokens(card)),
+            submenu_provider=self._token_submenu,
         )
         self.add_action(
             "send",
             "Send To",
-            handler=self._handle_tokens_clicked,
+            handler=None,
             visible_if=lambda card: bool(self._linked_tokens(card)),
         )
 
@@ -192,17 +193,29 @@ class CardContextMenu(BaseContextMenu):
             self._action_buttons.append(btn)
         self._apply_font()
 
-    def _handle_tokens_clicked(self, card=None, button: Optional[QPushButton] = None):
+    # def _handle_tokens_clicked(self, card=None, button: Optional[QPushButton] = None):
+    #     linked = self._linked_tokens(card)
+    #     if not linked:
+    #         self.hide()
+    #         return
+    #     descriptors = self._resolve_token_descriptors(linked)
+    #     if not descriptors:
+    #         self.hide()
+    #         return
+    #     items = [(desc.name or desc.id, partial(self._spawn_token_from_descriptor, desc)) for desc in descriptors]
+    #     self._show_submenu(items, button)
+
+    def _token_submenu(self, card) -> list[tuple[str, Callable[[], None]]]:
         linked = self._linked_tokens(card)
         if not linked:
-            self.hide()
-            return
+            return []
         descriptors = self._resolve_token_descriptors(linked)
-        if not descriptors:
-            self.hide()
-            return
-        items = [(desc.name or desc.id, partial(self._spawn_token_from_descriptor, desc)) for desc in descriptors]
-        self._show_submenu(items, button)
+        return [
+            (desc.name or desc.id, partial(self._spawn_token_from_descriptor, desc))
+            for desc in descriptors
+        ]
+    
+    
 
     def _handle_submenu_action(
         self,

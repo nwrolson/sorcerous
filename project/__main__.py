@@ -18,6 +18,7 @@ from zones.hand import HandZone
 from zones.library import LibraryZone
 from zones.preview import PreviewZone
 from zones.graveyard import GraveyardZone
+from zones.exile import ExileZone
 from zones.zone import Zone
 from card.card import Card
 from ui.deck_view import ListViewWidget
@@ -77,6 +78,7 @@ class MainWindow(QMainWindow):
         self.view.register_shortcut(Qt.Key_L, lambda ev: self._toggle_deck_view())
         self.view.register_shortcut(Qt.Key_V, lambda ev: self._toggle_zone_viewer())
         self.view.register_shortcut(Qt.Key_G, lambda ev: self._handle_graveyard_shortcut())
+        self.view.register_shortcut(Qt.Key_E, lambda ev: self._handle_exile_shortcut())
         self.view.register_shortcut(Qt.Key_X, self._handle_delete_shortcut)
         self.view.register_shortcut(Qt.Key_Escape, self._handle_escape_shortcut)
         self.view.register_shortcut(Qt.Key_M, lambda ev: self._toggle_icon_bar())
@@ -137,10 +139,12 @@ class MainWindow(QMainWindow):
         self.hand_zone = HandZone("hand")
         self.library_zone = LibraryZone("library")
         self.graveyard_zone = GraveyardZone("graveyard")
+        self.exile_zone = ExileZone("exile")
         self.preview_zone = PreviewZone("preview", width=260, slot_h=360)
         self.scene.add_zone(self.hand_zone, QPointF(0, 0))
         self.scene.add_zone(self.library_zone, QPointF(0, 0))
         self.scene.add_zone(self.graveyard_zone, QPointF(0, 0))
+        self.scene.add_zone(self.exile_zone, QPointF(0, 0))
         self.scene.add_zone(self.preview_zone, QPointF(0, 0))
         self.graveyard_zone.move_offscreen()
         self.hidden_zone_proxy = HiddenZoneProxyController(self.graveyard_zone, self.view, self.scene, self.model)
@@ -149,7 +153,7 @@ class MainWindow(QMainWindow):
         self.preview_zone.setVisible(False)
         self.deck_view_widget.set_preview_sources(self.scene, self.preview_zone)
         self.deck_view_widget.previewAreaChanged.connect(self._position_preview_zone)
-        self.zone_viewer.set_available_zones([self.graveyard_zone])
+        self.zone_viewer.set_available_zones([self.graveyard_zone, self.exile_zone])
         self.zone_viewer.show_zone(self.graveyard_zone.zone_id)
 
         # Shared cache root for cards and tokens.
@@ -438,6 +442,12 @@ class MainWindow(QMainWindow):
                 "name": "Graveyard",
             },
             {
+                "id": "exile",
+                "icon": base / "exile.svg",
+                "tooltip": "Exile",
+                "name": "Exile",
+            },
+            {
                 "id": "search",
                 "icon": base / "search.svg",
                 "tooltip": "Search",
@@ -461,6 +471,8 @@ class MainWindow(QMainWindow):
             case "library":
                 self._toggle_deck_view()
             case "graveyard":
+                self._toggle_zone_viewer()
+            case "exile":
                 self._toggle_zone_viewer()
             case "tokens":
                 self._toggle_token_menu()
@@ -822,6 +834,21 @@ class MainWindow(QMainWindow):
         self._insert_cards_into_zone(selected_cards, zone)
         self._refresh_hidden_proxy()
 
+    def _handle_exile_shortcut(self, ev=None):
+        scene = getattr(self, "scene", None)
+        zone = getattr(self, "exile_zone", None)
+        if scene is None or zone is None:
+            return
+        selected_cards = self._selected_cards_for_drop()
+        if not selected_cards:
+            return
+        if getattr(self, "_preview_state", None):
+            preview_card = self._preview_state.get("card")
+            if preview_card in selected_cards:
+                self._clear_preview(return_to_library=False)
+        self._insert_cards_into_zone(selected_cards, zone)
+        self._refresh_hidden_proxy()
+
     def _selected_cards_for_drop(self, primary: Card | None = None) -> list[Card]:
         scene = getattr(self, "scene", None)
         if scene is None:
@@ -1039,6 +1066,9 @@ class MainWindow(QMainWindow):
         graveyard = getattr(self, "graveyard_zone", None)
         if graveyard is not None:
             hidden_zones.append(graveyard)
+        exile = getattr(self, "exile_zone", None)
+        if exile is not None:
+            hidden_zones.append(exile)
         viewer.set_available_zones(hidden_zones)
         proxy = getattr(self, "hidden_zone_proxy", None)
         if proxy:
